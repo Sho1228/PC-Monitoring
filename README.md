@@ -1,5 +1,6 @@
 # PC Monitor with Discord Bot
 
+![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) <br>
 Please note that this is for educational purposes for those who are studying about how different Python packages and discord bots work.
 
 ## Installation
