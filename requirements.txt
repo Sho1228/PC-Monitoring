@@ -1,0 +1,17 @@
+# python==3.10
+# The above line is commented out because pip cannot install Python itself. Please use a compatible Python version (3.10 or 3.11 recommended).
+discord.py==2.3.2
+discord==2.3.2
+python-dotenv==1.0.0
+Pillow>=10.0.0,<10.3
+pyautogui==0.9.54
+pyscreeze==1.0.1
+sounddevice==0.4.6
+scipy==1.12.0
+numpy==1.26.4
+psutil==5.9.8
+opencv-python==4.9.0.80
+pynput==1.7.6
+# Quartz==0.0.4  # Removed, not a valid PyPI package
+pyobjc-framework-Quartz==9.2; sys_platform == 'darwin'
+pyobjc-framework-Cocoa==9.2; sys_platform == 'darwin' 
