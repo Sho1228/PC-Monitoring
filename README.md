@@ -87,6 +87,7 @@ This bot is designed exclusively for macOS systems and is currently in an experi
 - Some features may not work as expected due to the experimental nature
 - Use this tool only for legitimate purposes and with proper authorization
 - The developer, I am not responsible for any misuse of this software
+- Might change licence from GPL to MIT
 
 ### Warning: Unauthorized use of this bot, especially for malicious purposes, may violate laws and ToS.
 
