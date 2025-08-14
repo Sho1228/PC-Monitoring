@@ -148,8 +148,32 @@ def take_webcam_photo(warmup_seconds: float = 0.3):
     finally:
         cap.release()
 
+import Quartz
+
+NSEvent = Quartz.NSEvent
+NSSystemDefined = 14
+NX_KEYTYPE_PLAY = 16
+NX_KEYTYPE_NEXT = 17
+NX_KEYTYPE_PREVIOUS = 18
+
+def HIDPostAuxKey(key):
+    def doKey(down):
+        ev = NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+            NSSystemDefined,
+            (0, 0),
+            0xa00 if down else 0xb00,
+            0, 0, 0,
+            8,
+            (key << 16) | ((0xa if down else 0xb) << 8),
+            -1
+        )
+        cev = ev.CGEvent()
+        Quartz.CGEventPost(0, cev)
+    doKey(True)
+    doKey(False)
+
 def control_media(action: str):
-    """Control media playback using pyautogui media keys.
+    """Control media playback using Quartz media keys.
     
     Returns (success: bool, message: str)
     """
@@ -157,13 +181,13 @@ def control_media(action: str):
     
     try:
         if action == 'play':
-            pyautogui.press('playpause')
+            HIDPostAuxKey(NX_KEYTYPE_PLAY)
             return True, "Play/Pause command sent"
         elif action == 'next':
-            pyautogui.press('nexttrack')
+            HIDPostAuxKey(NX_KEYTYPE_NEXT)
             return True, "Next track command sent"
         elif action == 'prev':
-            pyautogui.press('prevtrack')
+            HIDPostAuxKey(NX_KEYTYPE_PREVIOUS)
             return True, "Previous track command sent"
         else:
             return False, f"Unsupported action: {action}"
