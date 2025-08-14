@@ -96,7 +96,16 @@ def get_uptime():
     seconds = int(uptime % 60)
     return f"{hours}h {minutes}m {seconds}s"
 
-def get_top_processes(limit=10):
+def get_top_processes(sort_by='ram', limit=15):
+    """Get top processes sorted by CPU or RAM usage, combining processes with same name.
+    
+    Args:
+        sort_by: 'cpu' or 'ram' to sort by CPU or RAM usage
+        limit: Number of process groups to return
+    
+    Returns:
+        List of process dictionaries with combined stats
+    """
     # List of common processes to exclude
     system_processes = {
         'WindowServer', 'kernel_task', 'launchd', 'logd', 'UserEventAgent', 'fseventsd',
@@ -115,19 +124,53 @@ def get_top_processes(limit=10):
         'com.apple.SafariWebContent.Preheated', 'com.apple.SafariWebContent.Service',
         'com.apple.SafariWebContent.WebProcess', 'com.apple.SafariWebKit',
     }
-    processes = []
-    for proc in psutil.process_iter(['pid', 'name', 'memory_info']):
+    
+    # Dictionary to combine processes by name
+    process_groups = {}
+    
+    for proc in psutil.process_iter(['pid', 'name', 'memory_info', 'cpu_percent']):
         try:
             info = proc.info
             name = info.get('name', '')
             if name in system_processes:
                 continue
+                
+            pid = info['pid']
             mem = info.get('memory_info')
             rss = mem.rss if mem else 0
-            processes.append({'name': name, 'pid': info['pid'], 'rss': rss})
+            
+            # Get CPU percentage (may be 0.0 on first call)
+            try:
+                cpu_percent = proc.cpu_percent()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                cpu_percent = 0.0
+            
+            # Combine processes with same name
+            if name in process_groups:
+                process_groups[name]['pids'].append(pid)
+                process_groups[name]['rss'] += rss
+                process_groups[name]['cpu_percent'] += cpu_percent
+                process_groups[name]['count'] += 1
+            else:
+                process_groups[name] = {
+                    'name': name,
+                    'pids': [pid],
+                    'rss': rss,
+                    'cpu_percent': cpu_percent,
+                    'count': 1
+                }
+                
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    processes.sort(key=lambda x: x['rss'], reverse=True)
+    
+    # Convert to list and sort
+    processes = list(process_groups.values())
+    
+    if sort_by == 'cpu':
+        processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
+    else:  # default to RAM
+        processes.sort(key=lambda x: x['rss'], reverse=True)
+    
     return processes[:limit]
 
 def take_webcam_photo(warmup_seconds: float = 0.3):
@@ -771,7 +814,7 @@ async def help_command(interaction: discord.Interaction):
 /sysinfo - Show system information
 /ip - Show IP address
 /uptime - Show system uptime
-/processes - Show top 10 processes by memory usage (RSS)
+/processes - Show top 15 processes by CPU or RAM usage
 /camera - Take a webcam photo
 /all - Run all monitoring commands
 /debug - Check the status of screenshot, audio recording, camera, and key system functions
@@ -904,14 +947,31 @@ async def uptime(interaction: discord.Interaction):
         logger.error(f"Error getting uptime: {str(e)}")
         await interaction.response.send_message(f"Error getting uptime: {str(e)}")
 
-@bot.tree.command(name='processes', description='Show top 10 processes by memory usage')
-async def processes(interaction: discord.Interaction):
+@bot.tree.command(name='processes', description='Show top 15 processes by CPU or RAM usage')
+@discord.app_commands.describe(sort_by='Sort processes by CPU or RAM usage')
+@discord.app_commands.choices(sort_by=[
+    discord.app_commands.Choice(name='RAM Usage', value='ram'),
+    discord.app_commands.Choice(name='CPU Usage', value='cpu')
+])
+async def processes(interaction: discord.Interaction, sort_by: discord.app_commands.Choice[str]):
     try:
-        processes = get_top_processes()
-        top_processes = "Top 10 processes by memory usage (RSS):\n"
-        for proc in processes:
-            mb = proc['rss'] / (1024 * 1024)
-            top_processes += f"{proc['name']} (PID {proc['pid']}): {mb:.2f} MB\n"
+        processes = get_top_processes(sort_by=sort_by.value, limit=15)
+        
+        if sort_by.value == 'cpu':
+            top_processes = "Top 15 processes by CPU usage:\n"
+            for proc in processes:
+                pid_list = ", ".join(map(str, proc['pids']))
+                cpu_percent = proc['cpu_percent']
+                count_text = f" ({proc['count']} processes)" if proc['count'] > 1 else ""
+                top_processes += f"**{proc['name']}**{count_text} (PID {pid_list}): {cpu_percent:.1f}%\n"
+        else:  # RAM
+            top_processes = "Top 15 processes by memory usage (RSS):\n"
+            for proc in processes:
+                pid_list = ", ".join(map(str, proc['pids']))
+                mb = proc['rss'] / (1024 * 1024)
+                count_text = f" ({proc['count']} processes)" if proc['count'] > 1 else ""
+                top_processes += f"**{proc['name']}**{count_text} (PID {pid_list}): {mb:.2f} MB\n"
+        
         await interaction.response.send_message(f"📊 ```{top_processes}```")
     except Exception as e:
         logger.error(f"Error getting processes: {str(e)}")
@@ -956,11 +1016,13 @@ async def execute_all(interaction: discord.Interaction):
         uptime_str = get_uptime()
         await interaction.followup.send(f"⏱️ Uptime: {uptime_str}")
         results.append("✓ Uptime")
-        processes = get_top_processes()
-        top_processes = "Top 10 processes by memory usage (RSS):\n"
+        processes = get_top_processes(sort_by='ram', limit=15)
+        top_processes = "Top 15 processes by memory usage (RSS):\n"
         for proc in processes:
+            pid_list = ", ".join(map(str, proc['pids']))
             mb = proc['rss'] / (1024 * 1024)
-            top_processes += f"{proc['name']} (PID {proc['pid']}): {mb:.2f} MB\n"
+            count_text = f" ({proc['count']} processes)" if proc['count'] > 1 else ""
+            top_processes += f"**{proc['name']}**{count_text} (PID {pid_list}): {mb:.2f} MB\n"
         await interaction.followup.send(f"📊 ```{top_processes}```")
         results.append("✓ Process list")
         photo_path = take_webcam_photo()
