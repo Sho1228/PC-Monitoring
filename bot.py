@@ -227,22 +227,42 @@ async def on_ready():
     except Exception as e:
         logger.error(f'Failed to sync commands: {e}')
     
-    # Find the first available text channel to send the success message
+    # Find the "pc-monitor" channel specifically
+    target_channel = None
     for guild in bot.guilds:
         for channel in guild.text_channels:
-            try:
-                await channel.send(f"The bot has initialized successfully and is now connected. Use slash commands (start typing `/`) to see available commands. <@955067999713361981>")
-                # perm check
-                if not check_camera_permission():
-                    await channel.send("[Warning] Camera permission required. Please enable it in System Preferences > Security & Privacy > Privacy > Camera.")
-                if not check_microphone_permission():
-                    await channel.send("[Warning] Microphone permission required. Please enable it in System Preferences > Security & Privacy > Privacy > Microphone.")
-                return  # send mess to 1st channel available
-            except discord.Forbidden:
-                continue  # try next channel if we no perm given
-            except Exception as e:
-                logger.error(f"Error sending ready message: {str(e)}")
-                continue
+            if channel.name == "pc-monitor":
+                target_channel = channel
+                break
+        if target_channel:
+            break
+    
+    # If pc-monitor channel found, send message there
+    if target_channel:
+        try:
+            await target_channel.send(f"🤖 PC Monitor Bot is online! Use slash commands (start typing `/`) to see available commands. <@955067999713361981>")
+            # perm check
+            if not check_camera_permission():
+                await target_channel.send("⚠️ [Warning] Camera permission required. Please enable it in System Preferences > Security & Privacy > Privacy > Camera.")
+            if not check_microphone_permission():
+                await target_channel.send("⚠️ [Warning] Microphone permission required. Please enable it in System Preferences > Security & Privacy > Privacy > Microphone.")
+        except discord.Forbidden:
+            logger.error("No permission to send messages in pc-monitor channel")
+        except Exception as e:
+            logger.error(f"Error sending ready message to pc-monitor channel: {str(e)}")
+    else:
+        logger.warning("pc-monitor channel not found. Bot is ready but no startup message sent.")
+        # Fallback: send to first available channel
+        for guild in bot.guilds:
+            for channel in guild.text_channels:
+                try:
+                    await channel.send(f"🤖 PC Monitor Bot is online! (pc-monitor channel not found) Use slash commands (start typing `/`) to see available commands. <@955067999713361981>")
+                    return
+                except discord.Forbidden:
+                    continue
+                except Exception as e:
+                    logger.error(f"Error sending fallback ready message: {str(e)}")
+                    continue
 
 @bot.event
 async def on_message(message):
