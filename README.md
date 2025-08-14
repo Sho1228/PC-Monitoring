@@ -1,113 +1,114 @@
-# PC Monitor with Discord Bot
+# PC Monitor Discord Bot
 
-![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) <br>
-Please note that this is for educational purposes for those who are studying about how different Python packages and discord bots work.
-
-## Installation
-
-1. Install Python 3.1 or higher
-2. Install the required packages:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Create a Discord bot:
-   - Go to [Discord Developer Portal](https://discord.com/developers/applications)
-   - Create a new application
-   - Go to the "Bot" section and create a bot
-   - Copy the bot token
-   - Go to the "OAuth2" section"
-   - Select the needed permission and copy the URL shown
-   -Copy and paste the URL on the server that you want to install the bot to
-   - Click the link and authenticate the bot
-4. Create a `.env` file in the project directory and add your bot token:
-   ```
-   DISCORD_TOKEN=your_discord_bot_token_here
-   ```
-5. Invite the bot to your server with the following permissions:
-   - Send Messages
-   - Attach Files
-   - Read Message History
-
-## Usage
-
-To run the bot, use:
-```bash
-python3 bot.py
-```
-
-Available commands (all use Discord slash commands):
-- `/ss` - Takes a screenshot of the current screen
-- `/mic` - Records 10 seconds of audio from the microphone
-- `/media <play/next/prev>` - Controls media playback using system media keys
-- `/volume <0-100>` - Sets system volume (0-100%)
-- `/power <sleep/restart/shutdown>` - Controls system power state
-- `/keylogger <start/stop>` - Starts or stops keylogging
-- `/sysinfo` - Shows comprehensive system information (CPU, RAM, battery, location, etc.)
-- `/ip` - Shows the system's IP address
-- `/locate` - Gets precise location with GPS coordinates and timestamp
-- `/uptime` - Shows system uptime
-- `/processes <cpu/ram>` - Shows top 15 processes by CPU or RAM usage
-- `/camera` - Takes a photo using the webcam
-- `/all` - Runs all monitoring commands
-- `/debug` - Tests all system functions
-- `/help` - Shows a list of available commands and their descriptions
+A powerful Discord bot for remotely monitoring and controlling a macOS computer.
 
 ## Features
 
-- **Screenshot capture** - High-quality screen captures
-- **Audio recording** - 10-second microphone recordings
-- **Media control** - System-wide media key simulation using Quartz framework
-- **Volume control** - Precise system volume adjustment
-- **Power control** - System shutdown, restart, and sleep with safety warnings
-- **System monitoring** - Comprehensive system information (CPU, RAM, battery, display)
-- **Location services** - Precise GPS location with coordinates and addresses
-- **Process monitoring** - Top 15 processes by CPU or RAM usage with process grouping
-- **Camera capture** - Webcam photos with automatic warmup
-- **Network information** - IP addresses and geographic location
-- **Keylogging** - Real-time keystroke monitoring (for educational purposes)
-- **System uptime** - Detailed uptime information
-- **Discord slash commands** - Modern command interface with auto-completion
-- **Automatic file cleanup** - Temporary files cleaned after transmission
-- **Comprehensive error handling** - Graceful failure handling with detailed messages
-- **Permission management** - Automatic permission checks for camera/microphone/location
-- **Multi-format support** - Screenshots, audio, photos, and text responses
+- **System Monitoring**:
+    - `/sysinfo`: Get comprehensive system details (CPU, RAM, battery, network, location, etc.).
+    - `/ip`: Display local and public IP addresses.
+    - `/uptime`: Show how long the system has been running.
+    - `/processes`: List top processes by CPU or RAM usage.
+    - `/locate`: Get precise GPS location using macOS Location Services.
+- **Surveillance**:
+    - `/ss`: Take a screenshot of the entire screen.
+    - `/camera`: Capture a photo from the webcam.
+    - `/mic`: Record 10 seconds of audio from the microphone.
+    - `/keylogger`: Start or stop a keylogger that sends keystrokes to Discord.
+- **System Control**:
+    - `/power`: Shut down, restart, or sleep the computer.
+    - `/volume`: Set the system volume.
+    - `/media`: Control media playback (play/pause, next, previous) for apps like Spotify, Apple Music, and YouTube.
+- **Utilities**:
+    - `/all`: Run all major monitoring commands at once.
+    - `/debug`: Test core functionalities and check for permission issues.
+    - `/help`: Display a list of all available commands.
 
-## Permissions (IMPORTANT)
+## Prerequisites
 
-- The bot requires camera and microphone permissions to function fully.
-- The first time you run the bot, macOS will prompt you to grant these permissions.
-- If you deny access, you must manually enable them in **System Preferences > Security & Privacy > Privacy > Camera/Microphone**.
-- The bot will notify you via Discord if permissions are missing.
+- macOS 12 (Monterey) or newer (required for the Shortcuts app integration).
+- Python 3.8 or newer.
+- A Discord account and a server where you have permissions to add bots.
 
-### Location Services Setup (for `/locate` command)
-- **GPS-based location** requires setting up a macOS Shortcut:
-  1. Open **Shortcuts** app on macOS
-  2. Create a new shortcut named **"Get Location Data"**
-  3. Add **"Get Current Location"** action
-  4. Grant location permissions when prompted
-  5. Test the shortcut manually before using the bot command
-- **Permissions**: Requires Location Services enabled for Shortcuts app
-- **Privacy**: All location data is processed locally and transmitted only to Discord
-- **Accuracy**: Uses precise GPS coordinates, not IP-based approximation
+## Setup
 
-### Power Control Setup (for `/power` command)
-- **⚠️ WARNING**: Shutdown and restart commands are **immediate** and **irreversible**
-- **Administrative access**: May require password for shutdown/restart operations
-- **Sleep command**: Generally works without additional permissions
-- **Safety features**: Warning messages and confirmations for destructive actions
-- **Remote access**: Be cautious - these actions will terminate the connection
+### 1. Clone the Repository
 
-## FYI
+```bash
+git clone https://github.com/Sho1228/PC-Monitoring.git
+cd PC-Monitoring
+```
 
-This bot is designed exclusively for macOS systems and is currently in an experimental phase. Please note the following important points:
+### 2. Install Dependencies
 
-- This is a development project and should be used responsibly
-- The bot requires appropriate permissions to function properly
-- Some features may not work as expected due to the experimental nature
-- Use this tool only for legitimate purposes and with proper authorization
-- The developer, I am not responsible for any misuse of this software
-- Might change licence from GPL to MIT
+It's highly recommended to use a Python virtual environment.
 
-### Warning: Unauthorized use of this bot, especially for malicious purposes, may violate laws and ToS.
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-### Please use this tool responsibly and ethically.
+### 3. Create a Discord Bot
+
+1.  Go to the Discord Developer Portal.
+2.  Click "New Application". Give it a name (e.g., "My PC Monitor") and click "Create".
+3.  Go to the "Bot" tab and click "Add Bot".
+4.  Under the bot's username, click "Reset Token" to view and copy your bot's token. **Treat this token like a password!**
+5.  Enable the **Message Content Intent** and **Server Members Intent** under "Privileged Gateway Intents".
+
+### 4. Configure Environment Variables
+
+Create a `.env` file in the project root by copying the template:
+
+```bash
+cp .env.template .env
+```
+
+Open the `.env` file with a text editor and paste your Discord bot token:
+
+```
+DISCORD_TOKEN=your_token_here
+```
+
+### 5. Set Up the Location Shortcut (Crucial for `/locate`)
+
+The `/locate` command relies on a macOS Shortcut to access precise GPS data.
+
+1.  Open the **Shortcuts** app on your Mac.
+2.  Click the **`+`** button to create a new shortcut.
+3.  In the search bar on the right, find the **"Get Current Location"** action and drag it into the main window.
+4.  Click on the shortcut's title at the top and rename it to **exactly** `Get Location Data`.
+5.  The shortcut saves automatically.
+6.  **Important**: Run the shortcut once manually from within the Shortcuts app. This will trigger the system permission prompt for Location Services. **You must allow it.**
+
+### 6. Grant System Permissions
+
+The bot requires several permissions to function correctly. The first time you run a command that needs a new permission, macOS will prompt you.
+
+Go to **System Settings > Privacy & Security** and ensure your terminal application (e.g., `Terminal`, `iTerm2`, or your code editor's integrated terminal) has the following permissions:
+
+-   **Screen Recording**: For `/ss`.
+-   **Camera**: For `/camera`.
+-   **Microphone**: For `/mic`.
+-   **Accessibility**: For the `/keylogger` and media controls.
+-   **Location Services**: Make sure the **Shortcuts** app is enabled here.
+
+### 7. Invite the Bot to Your Server
+
+1.  In the Discord Developer Portal, go to your application.
+2.  Select the "OAuth2" tab, then "URL Generator".
+3.  Select the `bot` and `applications.commands` scopes.
+4.  Under "Bot Permissions", select `Send Messages`, `Attach Files`, and `Read Message History`.
+5.  Copy the generated URL, paste it into your browser, and invite the bot to your server.
+
+## Running the Bot
+
+1.  Make sure you have a text channel named `pc-monitor` in your Discord server. The bot will send startup and warning messages there.
+2.  Run the Python script:
+
+```bash
+python bot.py
+```
+
+The bot should now be online in your Discord server. You can start using slash commands (e.g., `/sysinfo`).
