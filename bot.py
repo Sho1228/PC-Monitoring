@@ -274,17 +274,28 @@ def get_precise_location():
                 })
                 return location_data
             except json.JSONDecodeError:
-                # If not JSON, try to parse plain text coordinates
+                # If not JSON, try to parse plain text in the form:
+                # "address, latitude, longitude" OR "latitude, longitude"
                 if ',' in output:
-                    coords = output.split(',')
-                    if len(coords) >= 2:
-                        try:
-                            latitude = float(coords[0].strip())
-                            longitude = float(coords[1].strip())
-                            
-                            # Get address using reverse geocoding if we have coordinates
+                    parts = [p.strip() for p in output.split(',')]
+                    try:
+                        if len(parts) >= 3:
+                            # Use the last two fields as coordinates, everything before as address
+                            latitude = float(parts[-2])
+                            longitude = float(parts[-1])
+                            address_str = ', '.join(parts[:-2]).strip()
+                            location_data.update({
+                                'success': True,
+                                'latitude': latitude,
+                                'longitude': longitude,
+                                'address': address_str or 'Address not available'
+                            })
+                            return location_data
+                        elif len(parts) >= 2:
+                            latitude = float(parts[0])
+                            longitude = float(parts[1])
+                            # Fallback: derive address via reverse geocoding
                             address = get_address_from_coordinates(latitude, longitude)
-                            
                             location_data.update({
                                 'success': True,
                                 'latitude': latitude,
@@ -292,8 +303,10 @@ def get_precise_location():
                                 'address': address
                             })
                             return location_data
-                        except ValueError:
-                            location_data['error'] = "Invalid coordinate format from shortcut"
+                        else:
+                            location_data['error'] = "Unexpected shortcut output format"
+                    except ValueError:
+                        location_data['error'] = "Invalid coordinate format from shortcut"
                 else:
                     location_data['error'] = "Unexpected shortcut output format"
         else:
@@ -477,22 +490,18 @@ def control_media(action: str):
     Returns (success: bool, message: str)
     """
     action = action.lower()
-    
-    try:
-        if action == 'play':
-            HIDPostAuxKey(NX_KEYTYPE_PLAY)
-            return True, "Play/Pause command sent"
-        elif action == 'next':
-            HIDPostAuxKey(NX_KEYTYPE_NEXT)
-            return True, "Next track command sent"
-        elif action == 'prev':
-            HIDPostAuxKey(NX_KEYTYPE_PREVIOUS)
-            return True, "Previous track command sent"
-        else:
-            return False, f"Unsupported action: {action}"
-    except Exception as e:
-        logger.error(f"Error with media control: {str(e)}")
-        return False, f"Failed to send media command: {str(e)}"
+
+    if action == 'play':
+        HIDPostAuxKey(NX_KEYTYPE_PLAY)
+        return True, "Play/Pause command sent"
+    elif action == 'next':
+        HIDPostAuxKey(NX_KEYTYPE_NEXT)
+        return True, "Next track command sent"
+    elif action == 'prev':
+        HIDPostAuxKey(NX_KEYTYPE_PREVIOUS)
+        return True, "Previous track command sent"
+    else:
+        return False, f"Unsupported action: {action}"
 
 def set_volume(level):
     """Set system volume (macOS) to a value between 0 and 100."""
@@ -1221,7 +1230,7 @@ async def locate(interaction: discord.Interaction):
                 response_lines.append(f"🌐 **GPS Coordinates**: {lat:.6f}, {lon:.6f}")
                 
                 if location_data['address']:
-                    response_lines.append(f"🏠 **Address**: {location_data['address']}")
+                    response_lines.append(f"🏠 **Address**: \n{location_data['address']}")
                 
                 # Add map links
                 google_maps_url = f"https://maps.google.com/?q={lat},{lon}"
