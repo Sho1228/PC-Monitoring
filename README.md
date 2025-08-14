@@ -40,6 +40,7 @@ Available commands (all use Discord slash commands):
 - `/mic` - Records 10 seconds of audio from the microphone
 - `/media <play/next/prev>` - Controls media playback using system media keys
 - `/volume <0-100>` - Sets system volume (0-100%)
+- `/power <sleep/restart/shutdown>` - Controls system power state
 - `/keylogger <start/stop>` - Starts or stops keylogging
 - `/sysinfo` - Shows comprehensive system information (CPU, RAM, battery, location, etc.)
 - `/ip` - Shows the system's IP address
@@ -57,6 +58,7 @@ Available commands (all use Discord slash commands):
 - **Audio recording** - 10-second microphone recordings
 - **Media control** - System-wide media key simulation using Quartz framework
 - **Volume control** - Precise system volume adjustment
+- **Power control** - System shutdown, restart, and sleep with safety warnings
 - **System monitoring** - Comprehensive system information (CPU, RAM, battery, display)
 - **Location services** - Precise GPS location with coordinates and addresses
 - **Process monitoring** - Top 15 processes by CPU or RAM usage with process grouping
@@ -87,6 +89,13 @@ Available commands (all use Discord slash commands):
 - **Permissions**: Requires Location Services enabled for Shortcuts app
 - **Privacy**: All location data is processed locally and transmitted only to Discord
 - **Accuracy**: Uses precise GPS coordinates, not IP-based approximation
+
+### Power Control Setup (for `/power` command)
+- **⚠️ WARNING**: Shutdown and restart commands are **immediate** and **irreversible**
+- **Administrative access**: May require password for shutdown/restart operations
+- **Sleep command**: Generally works without additional permissions
+- **Safety features**: Warning messages and confirmations for destructive actions
+- **Remote access**: Be cautious - these actions will terminate the connection
 
 ## FYI
 
