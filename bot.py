@@ -130,26 +130,84 @@ def get_top_processes(limit=10):
     processes.sort(key=lambda x: x['rss'], reverse=True)
     return processes[:limit]
 
-def take_webcam_photo():
+def take_webcam_photo(warmup_seconds: float = 0.3):
+    """Open the webcam, wait briefly to allow exposure/focus to settle, then capture a photo."""
     cap = cv2.VideoCapture(0)
-    ret, frame = cap.read()
-    if ret:
+    if not cap.isOpened():
+        return None
+    try:
+        # Allow the camera to warm up
+        time.sleep(warmup_seconds)
+        # Capture frame after warmup
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            return None
         photo_path = f'webcam_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
         cv2.imwrite(photo_path, frame)
-        cap.release()
         return photo_path
-    cap.release()
-    return None
+    finally:
+        cap.release()
 
-def control_media(action):
+def control_media(action: str):
+    """Control media playback via Spotify or Music if running.
+
+    Returns (success: bool, message: str)
+    """
     action = action.lower()
-    if action == 'play':
-        subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 16'])
-    elif action == 'next':
-        subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 17'])
-    elif action == 'prev':
-        subprocess.run(['osascript', '-e', 'tell application "System Events" to key code 18'])
-    return action
+
+    action_to_applescript = {
+        'play': 'playpause',
+        'next': 'next track',
+        'prev': 'previous track',
+    }
+    if action not in action_to_applescript:
+        return False, f"Unsupported action: {action}"
+
+    applescript_command = action_to_applescript[action]
+
+    def is_app_running(candidate_names):
+        try:
+            candidate_lower = [c.lower() for c in candidate_names]
+            for proc in psutil.process_iter(['name']):
+                name = (proc.info.get('name') or '').lower()
+                if any(c in name for c in candidate_lower):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def run_osascript(app_name: str) -> bool:
+        try:
+            result = subprocess.run(
+                ['osascript', '-e', f'tell application "{app_name}" to {applescript_command}'],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    # Prefer controlling a running app to avoid launching unexpected apps
+    if is_app_running(['Spotify']):
+        if run_osascript('Spotify'):
+            return True, f"Media action '{action}' sent to Spotify"
+        # Fallback to focusing the app and simulating keys
+        if _activate_app('Spotify') and _pyautogui_control_app(action):
+            return True, f"Media action '{action}' simulated in Spotify"
+
+    if is_app_running(['Music', 'iTunes']):  # 'Music' on newer macOS, 'iTunes' on older
+        target = 'Music' if is_app_running(['Music']) else 'iTunes'
+        if run_osascript(target):
+            return True, f"Media action '{action}' sent to {target}"
+        if _activate_app(target) and _pyautogui_control_app(action):
+            return True, f"Media action '{action}' simulated in {target}"
+    # Try controlling YouTube in a browser as a fallback
+    yt_success, yt_msg = control_youtube_media(action)
+    if yt_success:
+        return True, yt_msg
+
+    return False, "No supported media player is running"
 
 def set_volume(level):
     """Set system volume (macOS) to a value between 0 and 100."""
@@ -162,6 +220,461 @@ def set_volume(level):
         return True, level
     except Exception as e:
         return False, str(e)
+
+def is_process_running(candidate_names):
+    """Return True if any process name contains any of the candidate name substrings (case-insensitive)."""
+    try:
+        candidate_lower = [c.lower() for c in candidate_names]
+        for proc in psutil.process_iter(['name']):
+            name = (proc.info.get('name') or '').lower()
+            if any(c in name for c in candidate_lower):
+                return True
+    except Exception:
+        pass
+    return False
+
+def format_time_mm_ss(seconds_value: float) -> str:
+    """Format seconds as MM:SS for display."""
+    try:
+        total_seconds = max(0, int(round(float(seconds_value))))
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        return f"{minutes:02d}:{seconds:02d}"
+    except Exception:
+        return "00:00"
+
+def get_spotify_playing_info():
+    """Return a dict of now-playing info for Spotify, or None if unavailable."""
+    if not is_process_running(['Spotify']):
+        return None
+    try:
+        script = (
+            'tell application "Spotify" to set out to '
+            '(name of current track as text) & "\t" & '
+            '(artist of current track as text) & "\t" & '
+            '(album of current track as text) & "\t" & '
+            '(duration of current track as text) & "\t" & '
+            '(player position as text) & "\t" & '
+            '(try artwork url of current track as text on error "" end try) & "\t" & '
+            '(player state as text)\nreturn out'
+        )
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        if not raw:
+            return None
+        parts = raw.split('\t')
+        if len(parts) < 7:
+            return None
+        title, artist, album, duration_str, position_str, artwork_url, state = parts[:7]
+        try:
+            duration = float(duration_str)
+            if duration > 10000:
+                duration = duration / 1000.0
+        except Exception:
+            duration = 0.0
+        try:
+            position = float(position_str)
+        except Exception:
+            position = 0.0
+        return {
+            'app': 'Spotify',
+            'title': title,
+            'artist': artist,
+            'album': album,
+            'duration': duration,
+            'position': position,
+            'state': state,
+            'artwork_url': artwork_url if artwork_url else None,
+            'artwork_path': None,
+        }
+    except Exception:
+        return None
+
+def get_music_playing_info():
+    """Return a dict of now-playing info for Music/iTunes, or None if unavailable."""
+    target = 'Music' if is_process_running(['Music']) else ('iTunes' if is_process_running(['iTunes']) else None)
+    if not target:
+        return None
+    try:
+        info_script = (
+            f'return (tell application "{target}" to '
+            f'(name of current track as text) & "\t" & '
+            f'(artist of current track as text) & "\t" & '
+            f'(album of current track as text) & "\t" & '
+            f'(duration of current track as text) & "\t" & '
+            f'(player position as text) & "\t" & '
+            f'(player state as text))'
+        )
+        result = subprocess.run(['osascript', '-e', info_script], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        if not raw:
+            return None
+        parts = raw.split('\t')
+        if len(parts) < 6:
+            return None
+        title, artist, album, duration_str, position_str, state = parts[:6]
+        try:
+            duration = float(duration_str)
+        except Exception:
+            duration = 0.0
+        try:
+            position = float(position_str)
+        except Exception:
+            position = 0.0
+
+        artwork_path = '/tmp/music_artwork.jpg'
+        art_script = (
+            'set outPath to POSIX file "' + artwork_path + '"\n'
+            'tell application "' + target + '"\n'
+            '    try\n'
+            '        if (count of artworks of current track) > 0 then\n'
+            '            set fileRef to open for access outPath with write permission\n'
+            '            set eof of fileRef to 0\n'
+            '            write (data of artwork 1 of current track) to fileRef\n'
+            '            close access fileRef\n'
+            '            return POSIX path of outPath\n'
+            '        else\n'
+            '            return ""\n'
+            '        end if\n'
+            '    on error\n'
+            '        try\n'
+            '            close access outPath\n'
+            '        end try\n'
+            '        return ""\n'
+            '    end try\n'
+            'end tell'
+        )
+        art_res = subprocess.run(['osascript', '-e', art_script], capture_output=True, text=True, check=False)
+        art_out = art_res.stdout.strip() if art_res.returncode == 0 else ''
+        if not art_out or not os.path.exists(artwork_path):
+            artwork_path = None
+
+        return {
+            'app': target,
+            'title': title,
+            'artist': artist,
+            'album': album,
+            'duration': duration,
+            'position': position,
+            'state': state,
+            'artwork_url': None,
+            'artwork_path': artwork_path,
+        }
+    except Exception:
+        return None
+
+def get_media_playing_info():
+    """Return now-playing info for Spotify or Music, preferring Spotify if both available."""
+    info = get_spotify_playing_info()
+    if info:
+        return info
+    info = get_music_playing_info()
+    if info:
+        return info
+    # Fallback: try YouTube in common browsers
+    info = get_youtube_playing_info()
+    if info:
+        return info
+    return None
+
+def _run_js_in_chromium_app(app_name: str, js: str) -> str:
+    """Execute JavaScript in the active tab of the front window of a Chromium-based browser."""
+    try:
+        script = (f'tell application "{app_name}"\n'
+                  f'  if (count of windows) = 0 then return ""\n'
+                  f'  set theTab to active tab of front window\n'
+                  f'  execute javascript "{js}" in theTab\n'
+                  f'end tell')
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except Exception:
+        return ''
+
+def _run_js_in_safari(js: str) -> str:
+    """Execute JavaScript in the current tab of the front document in Safari."""
+    try:
+        script = ('tell application "Safari"\n'
+                  '  if (count of documents) = 0 then return ""\n'
+                  f'  do JavaScript "{js}" in current tab of front document\n'
+                  'end tell')
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except Exception:
+        return ''
+
+def _run_js_in_chromium_app_any_youtube_tab(app_name: str, js: str) -> str:
+    """Execute JavaScript in the first YouTube tab across all windows of a Chromium-based browser."""
+    try:
+        script = (
+            f'tell application "{app_name}"\n'
+            '  set theResult to ""\n'
+            '  if (count of windows) = 0 then return theResult\n'
+            '  repeat with w in windows\n'
+            '    repeat with t in tabs of w\n'
+            '      set theUrl to (URL of t as text)\n'
+            '      if theUrl contains "youtube.com" or theUrl contains "music.youtube.com" then\n'
+            f'        set theResult to execute javascript "{js}" in t\n'
+            '        return theResult\n'
+            '      end if\n'
+            '    end repeat\n'
+            '  end repeat\n'
+            '  return theResult\n'
+            'end tell'
+        )
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except Exception:
+        return ''
+
+def _run_js_in_safari_any_youtube_tab(js: str) -> str:
+    """Execute JavaScript in the first YouTube tab across all documents in Safari."""
+    try:
+        script = (
+            'tell application "Safari"\n'
+            '  set theResult to ""\n'
+            '  if (count of documents) = 0 then return theResult\n'
+            '  repeat with d in documents\n'
+            '    set theUrl to (URL of d as text)\n'
+            '    if theUrl contains "youtube.com" or theUrl contains "music.youtube.com" then\n'
+            f'      set theResult to do JavaScript "{js}" in d\n'
+            '      return theResult\n'
+            '    end if\n'
+            '  end repeat\n'
+            '  return theResult\n'
+            'end tell'
+        )
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except Exception:
+        return ''
+
+def get_youtube_playing_info():
+    """Return now-playing info when YouTube is playing in Chrome/Brave/Edge/Vivaldi/Opera or Safari, else None."""
+    # JavaScript to collect: position, duration, title, channel, url, artwork, state
+    js = (
+        "var v=document.querySelector('video');"
+        "var url=location.href;"
+        "var title=document.title||'';"
+        "var chEl=document.querySelector('#owner-name a, ytd-channel-name a, ytd-video-owner-renderer a');"
+        "var channel=chEl?chEl.textContent.trim():'';"
+        "var id='';try{id=(new URL(url)).searchParams.get('v')||'';}catch(e){id='';}"
+        "var art=id?('https://i.ytimg.com/vi/'+id+'/hqdefault.jpg'):'';"
+        "var state=(v&& !v.paused)?'playing':(v?'paused':'stopped');"
+        "(v?v.currentTime:0)+'\\t'+(v?v.duration:0)+'\\t'+title+'\\t'+channel+'\\t'+url+'\\t'+art+'\\t'+state;"
+    )
+
+    chromium_apps = [
+        'Google Chrome',
+        'Brave Browser',
+        'Microsoft Edge',
+        'Vivaldi',
+        'Opera',
+    ]
+
+    # Try Chromium-based browsers first
+    for app in chromium_apps:
+        if is_process_running([app]):
+            out = _run_js_in_chromium_app(app, js)
+            if out:
+                parts = out.split('\t')
+                if len(parts) >= 7 and ('youtube.com' in parts[4] or 'music.youtube.com' in parts[4]):
+                    try:
+                        position = float(parts[0])
+                    except Exception:
+                        position = 0.0
+                    try:
+                        duration = float(parts[1])
+                    except Exception:
+                        duration = 0.0
+                    title = parts[2]
+                    channel = parts[3]
+                    artwork_url = parts[5] if parts[5] else None
+                    state = parts[6] if parts[6] else 'unknown'
+                    return {
+                        'app': f'YouTube ({app})',
+                        'title': title,
+                        'artist': channel or 'Unknown',
+                        'album': 'YouTube',
+                        'duration': duration,
+                        'position': position,
+                        'state': state,
+                        'artwork_url': artwork_url,
+                        'artwork_path': None,
+                    }
+
+    # Try any YouTube tab in Chromium browsers
+    for app in chromium_apps:
+        if is_process_running([app]):
+            out = _run_js_in_chromium_app_any_youtube_tab(app, js)
+            if out:
+                parts = out.split('\t')
+                if len(parts) >= 7 and ('youtube.com' in parts[4] or 'music.youtube.com' in parts[4]):
+                    try:
+                        position = float(parts[0])
+                    except Exception:
+                        position = 0.0
+                    try:
+                        duration = float(parts[1])
+                    except Exception:
+                        duration = 0.0
+                    title = parts[2]
+                    channel = parts[3]
+                    artwork_url = parts[5] if parts[5] else None
+                    state = parts[6] if parts[6] else 'unknown'
+                    return {
+                        'app': f'YouTube ({app})',
+                        'title': title,
+                        'artist': channel or 'Unknown',
+                        'album': 'YouTube',
+                        'duration': duration,
+                        'position': position,
+                        'state': state,
+                        'artwork_url': artwork_url,
+                        'artwork_path': None,
+                    }
+
+    # Try Safari
+    if is_process_running(['Safari']):
+        out = _run_js_in_safari(js)
+        if out:
+            parts = out.split('\t')
+            if len(parts) >= 7 and ('youtube.com' in parts[4] or 'music.youtube.com' in parts[4]):
+                try:
+                    position = float(parts[0])
+                except Exception:
+                    position = 0.0
+                try:
+                    duration = float(parts[1])
+                except Exception:
+                    duration = 0.0
+                title = parts[2]
+                channel = parts[3]
+                artwork_url = parts[5] if parts[5] else None
+                state = parts[6] if parts[6] else 'unknown'
+                return {
+                    'app': 'YouTube (Safari)',
+                    'title': title,
+                    'artist': channel or 'Unknown',
+                    'album': 'YouTube',
+                    'duration': duration,
+                    'position': position,
+                    'state': state,
+                    'artwork_url': artwork_url,
+                    'artwork_path': None,
+                }
+
+    # Any YouTube tab in Safari
+    if is_process_running(['Safari']):
+        out = _run_js_in_safari_any_youtube_tab(js)
+        if out:
+            parts = out.split('\t')
+            if len(parts) >= 7 and ('youtube.com' in parts[4] or 'music.youtube.com' in parts[4]):
+                try:
+                    position = float(parts[0])
+                except Exception:
+                    position = 0.0
+                try:
+                    duration = float(parts[1])
+                except Exception:
+                    duration = 0.0
+                title = parts[2]
+                channel = parts[3]
+                artwork_url = parts[5] if parts[5] else None
+                state = parts[6] if parts[6] else 'unknown'
+                return {
+                    'app': 'YouTube (Safari)',
+                    'title': title,
+                    'artist': channel or 'Unknown',
+                    'album': 'YouTube',
+                    'duration': duration,
+                    'position': position,
+                    'state': state,
+                    'artwork_url': artwork_url,
+                    'artwork_path': None,
+                }
+    return None
+
+def _chromium_media_control(app_name: str, action: str) -> bool:
+    # Uses Media Session JS API or key simulation inside the tab if possible
+    js_map = {
+        'play': "(()=>{var v=document.querySelector('video');if(!v)return false; if(v.paused){v.play();}else{v.pause();} return true;})()",
+        'next': "(()=>{var btn=document.querySelector('.ytp-next-button, ytd-player .ytp-next-button'); if(btn){btn.click(); return true;} return false;})()",
+        'prev': "(()=>{var btn=document.querySelector('.ytp-prev-button, ytd-player .ytp-prev-button'); if(btn){btn.click(); return true;} return false;})()",
+    }
+    js = js_map.get(action)
+    if not js:
+        return False
+    out = _run_js_in_chromium_app(app_name, js)
+    return out.strip().lower() == 'true'
+
+def _safari_media_control(action: str) -> bool:
+    js_map = {
+        'play': "(()=>{var v=document.querySelector('video');if(!v)return false; if(v.paused){v.play();}else{v.pause();} return true;})()",
+        'next': "(()=>{var btn=document.querySelector('.ytp-next-button, ytd-player .ytp-next-button'); if(btn){btn.click(); return true;} return false;})()",
+        'prev': "(()=>{var btn=document.querySelector('.ytp-prev-button, ytd-player .ytp-prev-button'); if(btn){btn.click(); return true;} return false;})()",
+    }
+    js = js_map.get(action)
+    if not js:
+        return False
+    out = _run_js_in_safari(js)
+    return out.strip().lower() == 'true'
+
+def _activate_app(app_name: str) -> bool:
+    try:
+        result = subprocess.run(['osascript', '-e', f'tell application "{app_name}" to activate'], capture_output=True, text=True, check=False)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+def _pyautogui_control_app(action: str) -> bool:
+    try:
+        if action == 'play':
+            pyautogui.press('space')
+            return True
+        if action == 'next':
+            pyautogui.hotkey('command', 'right')
+            return True
+        if action == 'prev':
+            pyautogui.hotkey('command', 'left')
+            return True
+    except Exception:
+        return False
+    return False
+
+def control_youtube_media(action: str):
+    """Attempt to control YouTube playback in common browsers. Returns (success, message)."""
+    chromium_apps = ['Google Chrome', 'Brave Browser', 'Microsoft Edge', 'Vivaldi', 'Opera']
+    for app in chromium_apps:
+        if is_process_running([app]):
+            # Ensure we're on a YouTube tab
+            check = _run_js_in_chromium_app(app, "location.href.includes('youtube.com')||location.href.includes('music.youtube.com')")
+            if check.strip().lower() == 'true':
+                if _chromium_media_control(app, action):
+                    return True, f"Media action '{action}' sent to YouTube ({app})"
+                # Fallback: try any YouTube tab across windows
+                check_any = _run_js_in_chromium_app_any_youtube_tab(app, "location.href")
+                if check_any and ('youtube.com' in check_any or 'music.youtube.com' in check_any):
+                    if _chromium_media_control(app, action):
+                        return True, f"Media action '{action}' sent to YouTube ({app}) via fallback"
+                # Final fallback: activate app and simulate keystrokes
+                if _activate_app(app) and _pyautogui_control_app(action):
+                    return True, f"Media action '{action}' simulated in YouTube ({app})"
+    if is_process_running(['Safari']):
+        check = _run_js_in_safari("location.href.includes('youtube.com')||location.href.includes('music.youtube.com')")
+        if check.strip().lower() == 'true':
+            if _safari_media_control(action):
+                return True, f"Media action '{action}' sent to YouTube (Safari)"
+            check_any = _run_js_in_safari_any_youtube_tab("location.href")
+            if check_any and ('youtube.com' in check_any or 'music.youtube.com' in check_any):
+                if _safari_media_control(action):
+                    return True, f"Media action '{action}' sent to YouTube (Safari) via fallback"
+            if _activate_app('Safari') and _pyautogui_control_app(action):
+                return True, f"Media action '{action}' simulated in YouTube (Safari)"
+    return False, "No supported media tab is active"
 
 def on_key_press(key):
     global last_send_time
@@ -222,8 +735,15 @@ async def send_error(ctx, context, error):
 async def on_ready():
     logger.info(f'Bot is ready! Logged in as {bot.user.name}')
     try:
-        synced = await bot.tree.sync()
-        logger.info(f'Synced {len(synced)} command(s)')
+        synced_global = await bot.tree.sync()
+        logger.info(f'Synced {len(synced_global)} global command(s)')
+        # Force per-guild sync for immediate updates to choices/options
+        for guild in bot.guilds:
+            try:
+                synced_guild = await bot.tree.sync(guild=guild)
+                logger.info(f"Synced {len(synced_guild)} guild command(s) for guild {guild.name} ({guild.id})")
+            except Exception as e:
+                logger.error(f"Failed to sync guild commands for {guild.name} ({guild.id}): {e}")
     except Exception as e:
         logger.error(f'Failed to sync commands: {e}')
     
@@ -277,7 +797,7 @@ async def help_command(interaction: discord.Interaction):
 **PC Monitor Bot Commands**
 /ss - Take a screenshot
 /mic - Record audio from the microphone
-/media - Control media playback (play/next/prev)
+/media - Control media playback and show now playing (play/next/prev/playing)
 /volume - Set system volume (0-100%)
 /keylogger - Start or stop the keylogger
 /sysinfo - Show system information
@@ -320,20 +840,138 @@ async def record(interaction: discord.Interaction):
         else:
             await interaction.followup.send(f"Error recording audio: {str(e)}")
 
-@bot.tree.command(name='media', description='Control media playback')
+@bot.tree.command(name='media', description='Control media playback and show now playing info')
 @discord.app_commands.describe(action='Media action to perform')
 @discord.app_commands.choices(action=[
     discord.app_commands.Choice(name='Play/Pause', value='play'),
     discord.app_commands.Choice(name='Next Track', value='next'),
-    discord.app_commands.Choice(name='Previous Track', value='prev')
+    discord.app_commands.Choice(name='Previous Track', value='prev'),
+    discord.app_commands.Choice(name='Now Playing', value='playing')
 ])
 async def media_control(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
+    """Enhanced media control with proper error handling and response management."""
+    artwork_path = None
     try:
-        result = control_media(action.value)
-        await interaction.response.send_message(f"🎵 Media control: {action.name}")
+        # Defer the response early to prevent timeout
+        await interaction.response.defer()
+        
+        content_lines = []
+        file_to_send = None
+        embed = None
+
+        # Handle control actions
+        if action.value in ('play', 'next', 'prev'):
+            try:
+                success, msg = control_media(action.value)
+                status_emoji = '🎵' if success else '⚠️'
+                content_lines.append(f"{status_emoji} {msg}")
+                
+                # Add a small delay to let the media player update
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Error in control_media: {str(e)}")
+                content_lines.append(f"⚠️ Error controlling media: {str(e)}")
+
+        # Fetch current playing info
+        try:
+            info = get_media_playing_info()
+        except Exception as e:
+            logger.error(f"Error getting media info: {str(e)}")
+            info = None
+
+        if info:
+            try:
+                # Extract info with safe defaults
+                app = info.get('app', 'Unknown')
+                title = info.get('title', 'Unknown')
+                artist = info.get('artist', 'Unknown') 
+                album = info.get('album', 'Unknown')
+                duration = float(info.get('duration', 0.0))
+                position = float(info.get('position', 0.0))
+                state = info.get('state', 'unknown')
+                
+                # Format progress display
+                progress = f"{format_time_mm_ss(position)} / {format_time_mm_ss(duration)}"
+
+                # Create embed with appropriate color
+                if 'Spotify' in app:
+                    color = 0x1DB954  # Spotify green
+                elif 'YouTube' in app:
+                    color = 0xFF0000  # YouTube red
+                elif 'Music' in app or 'iTunes' in app:
+                    color = 0xFA233B  # Apple Music red
+                else:
+                    color = 0x808080  # Default gray
+
+                embed = discord.Embed(
+                    title='🎵 Now Playing', 
+                    description=f"**{title}**", 
+                    color=color
+                )
+                embed.add_field(name='App', value=app, inline=True)
+                embed.add_field(name='Artist', value=artist, inline=True)
+                embed.add_field(name='Album', value=album, inline=True)
+                embed.add_field(name='State', value=state.capitalize(), inline=True)
+                embed.add_field(name='Progress', value=progress, inline=True)
+                embed.add_field(name='\u200b', value='\u200b', inline=True)  # Empty field for formatting
+
+                # Handle artwork
+                artwork_url = info.get('artwork_url')
+                info_artwork_path = info.get('artwork_path')
+                
+                if artwork_url:
+                    embed.set_thumbnail(url=artwork_url)
+                elif info_artwork_path and os.path.exists(info_artwork_path):
+                    try:
+                        file_to_send = discord.File(info_artwork_path, filename='artwork.jpg')
+                        embed.set_thumbnail(url='attachment://artwork.jpg')
+                        artwork_path = info_artwork_path  # Store for cleanup
+                    except Exception as e:
+                        logger.error(f"Error loading artwork file: {str(e)}")
+                        file_to_send = None
+
+            except Exception as e:
+                logger.error(f"Error creating embed: {str(e)}")
+                embed = None
+
+        # Build final content message
+        if content_lines:
+            content = "\n".join(content_lines)
+        elif info:
+            content = "🎵 Now Playing"
+        else:
+            content = "⚠️ No supported media player is running"
+
+        # Send the response
+        try:
+            if file_to_send and embed:
+                await interaction.followup.send(content, embed=embed, file=file_to_send)
+            elif embed:
+                await interaction.followup.send(content, embed=embed)
+            else:
+                await interaction.followup.send(content)
+        except Exception as e:
+            logger.error(f"Error sending media response: {str(e)}")
+            await interaction.followup.send(f"⚠️ Error displaying media info: {str(e)}")
+
     except Exception as e:
-        logger.error(f"Error controlling media: {str(e)}")
-        await interaction.response.send_message(f"Error controlling media: {str(e)}")
+        logger.error(f"Critical error in media_control: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"⚠️ Error controlling media: {str(e)}")
+            else:
+                await interaction.followup.send(f"⚠️ Error controlling media: {str(e)}")
+        except Exception:
+            pass  # If we can't even send an error message, log it
+            
+    finally:
+        # Clean up temporary artwork files
+        if artwork_path and os.path.exists(artwork_path):
+            try:
+                os.remove(artwork_path)
+                logger.info(f"Cleaned up temporary artwork file: {artwork_path}")
+            except Exception as e:
+                logger.error(f"Error cleaning up artwork file {artwork_path}: {str(e)}")
 
 @bot.tree.command(name='volume', description='Set system volume')
 @discord.app_commands.describe(level='Volume level (0-100)')
