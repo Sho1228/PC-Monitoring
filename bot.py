@@ -35,6 +35,9 @@ from Quartz import (
 )
 import shutil
 import traceback
+import fnmatch
+import re
+from pathlib import Path
 
 # Set up
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +50,10 @@ if not TOKEN:
     logger.error('DISCORD_TOKEN not found in environment variables. Please set it in your .env file.')
     print('DISCORD_TOKEN not found in environment variables. Please set it in your .env file.')
     exit(1)
+
+# Configuration for new commands
+ALLOWED_USER_IDS = os.getenv('ALLOWED_USER_IDS', '')  # Comma-separated list of user IDs authorized for /kill
+FIND_DEFAULT_PATH = os.getenv('FIND_DEFAULT_PATH', str(Path.home()))  # Default search path for /find command
 
 # Bot setup
 intents = discord.Intents.default()
@@ -979,6 +986,317 @@ def _activate_app(app_name: str) -> bool:
     except Exception:
         return False
 
+# Utility functions for new commands
+async def search_files_async(query: str, path: str, mode: str = 'name_glob', content: str = None, 
+                           limit: int = 100, depth: int = 6, include_hidden: bool = False, 
+                           timeout: float = 30.0):
+    """Search for files asynchronously with various filters."""
+    import time
+    from datetime import datetime
+    
+    def _search_files():
+        results = []
+        start_time = time.time()
+        search_path = Path(path).expanduser().resolve()
+        
+        if not search_path.exists():
+            return {'error': f"Path does not exist: {path}"}
+        
+        try:
+            for root, dirs, files in os.walk(str(search_path)):
+                # Check timeout
+                if time.time() - start_time > timeout:
+                    return {'results': results, 'partial': True, 'message': 'Search timed out after 30s'}
+                
+                # Calculate current depth
+                current_depth = len(Path(root).relative_to(search_path).parts)
+                if current_depth >= depth:
+                    dirs.clear()  # Don't recurse deeper
+                    continue
+                
+                # Filter hidden directories if not included
+                if not include_hidden:
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                
+                for filename in files:
+                    # Skip hidden files if not included
+                    if not include_hidden and filename.startswith('.'):
+                        continue
+                    
+                    # Check file name match
+                    name_match = False
+                    if mode == 'name_glob':
+                        try:
+                            name_match = fnmatch.fnmatch(filename, query)
+                        except Exception:
+                            continue
+                    elif mode == 'name_regex':
+                        try:
+                            name_match = bool(re.search(query, filename))
+                        except Exception:
+                            continue
+                    
+                    if name_match:
+                        file_path = Path(root) / filename
+                        try:
+                            stat_info = file_path.stat()
+                            file_size = stat_info.st_size
+                            mod_time = datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M')
+                            
+                            # Content filtering for small files
+                            content_match = True
+                            if content and file_size <= 10 * 1024 * 1024:  # Only scan files <= 10MB
+                                try:
+                                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                        file_content = f.read().lower()
+                                        content_match = content.lower() in file_content
+                                except Exception:
+                                    content_match = False
+                            elif content and file_size > 10 * 1024 * 1024:
+                                content_match = False  # Skip large files for content search
+                            
+                            if content_match:
+                                results.append({
+                                    'path': str(file_path),
+                                    'size': file_size,
+                                    'modified': mod_time
+                                })
+                                
+                                if len(results) >= limit:
+                                    return {'results': results, 'partial': False}
+                        except Exception:
+                            continue
+            
+            return {'results': results, 'partial': False}
+        except Exception as e:
+            return {'error': f"Search error: {str(e)}"}
+    
+    # Run in thread to avoid blocking
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _search_files)
+
+async def search_processes_async(name: str = None, pid: int = None, mode: str = 'name_substring',
+                               limit: int = 15, sort_by: str = 'cpu'):
+    """Search for processes asynchronously with filtering and sorting."""
+    
+    def _search_processes():
+        try:
+            processes = []
+            
+            # Warm up CPU measurement if sorting by CPU
+            if sort_by == 'cpu':
+                for proc in psutil.process_iter(['pid']):
+                    try:
+                        proc.cpu_percent()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                time.sleep(0.2)  # Brief pause for CPU measurement
+            
+            # Collect process information
+            for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_info', 'create_time', 'cmdline']):
+                try:
+                    info = proc.info
+                    proc_pid = info.get('pid')
+                    proc_name = info.get('name', '')
+                    
+                    # Apply filters
+                    if pid is not None:
+                        if proc_pid != pid:
+                            continue
+                    elif name is not None:
+                        if mode == 'name_substring':
+                            if name.lower() not in proc_name.lower():
+                                continue
+                        elif mode == 'name_regex':
+                            try:
+                                if not re.search(name, proc_name, re.IGNORECASE):
+                                    continue
+                            except Exception:
+                                continue
+                    else:
+                        return {'error': 'Either name or pid must be provided'}
+                    
+                    # Get additional info
+                    try:
+                        cpu_percent = proc.cpu_percent() if sort_by == 'cpu' else 0.0
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        cpu_percent = 0.0
+                    
+                    try:
+                        memory_mb = info.get('memory_info').rss / (1024 * 1024) if info.get('memory_info') else 0.0
+                    except (AttributeError, TypeError):
+                        memory_mb = 0.0
+                    
+                    try:
+                        username = info.get('username', 'unknown')
+                    except Exception:
+                        username = 'unknown'
+                    
+                    try:
+                        create_time = info.get('create_time', 0)
+                        uptime_seconds = time.time() - create_time if create_time else 0
+                        uptime_str = f"{int(uptime_seconds // 3600)}h{int((uptime_seconds % 3600) // 60)}m"
+                    except Exception:
+                        uptime_str = 'unknown'
+                    
+                    try:
+                        cmdline = info.get('cmdline', [])
+                        cmd_str = ' '.join(cmdline[:3]) if cmdline else proc_name  # First 3 args
+                        if len(cmd_str) > 50:
+                            cmd_str = cmd_str[:47] + "..."
+                    except Exception:
+                        cmd_str = proc_name
+                    
+                    processes.append({
+                        'pid': proc_pid,
+                        'name': proc_name,
+                        'username': username,
+                        'cpu_percent': cpu_percent,
+                        'memory_mb': memory_mb,
+                        'uptime': uptime_str,
+                        'cmdline': cmd_str
+                    })
+                    
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            
+            # Sort processes
+            if sort_by == 'cpu':
+                processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
+            elif sort_by == 'mem':
+                processes.sort(key=lambda x: x['memory_mb'], reverse=True)
+            elif sort_by == 'pid':
+                processes.sort(key=lambda x: x['pid'])
+            elif sort_by == 'name':
+                processes.sort(key=lambda x: x['name'].lower())
+            
+            return {'results': processes[:limit]}
+            
+        except Exception as e:
+            return {'error': f"Process search error: {str(e)}"}
+    
+    # Run in thread to avoid blocking
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _search_processes)
+
+def is_protected_process(pid: int, name: str) -> bool:
+    """Check if a process is protected and should not be terminated."""
+    # Current bot process
+    if pid == os.getpid():
+        return True
+    
+    # System critical PID 1
+    if pid == 1:
+        return True
+    
+    # Protected macOS processes (case-insensitive)
+    protected_names = {
+        'kernel_task', 'launchd', 'windowserver', 'loginwindow', 'systemstats', 
+        'syslogd', 'configd', 'coreaudiod', 'mds', 'mds_stores', 'distnoted', 
+        'bluetoothd', 'opendirectoryd', 'cfprefsd', 'powerd', 'dock', 'finder', 
+        'spotlightd', 'tccd'
+    }
+    
+    name_lower = name.lower()
+    return any(protected in name_lower for protected in protected_names)
+
+def is_authorized_user(user_id: int, guild_owner_id: int) -> bool:
+    """Check if user is authorized to use the kill command."""
+    # Guild owner is always authorized
+    if user_id == guild_owner_id:
+        return True
+    
+    # Check against allowed user IDs
+    if ALLOWED_USER_IDS:
+        allowed_ids = [id.strip() for id in ALLOWED_USER_IDS.split(',') if id.strip()]
+        return str(user_id) in allowed_ids
+    
+    return False
+
+async def terminate_process_async(pid: int = None, name: str = None, signal_type: str = 'TERM', 
+                                force: bool = False):
+    """Terminate a process asynchronously with safety checks."""
+    
+    def _terminate_process():
+        try:
+            # Resolve target process
+            if pid is not None:
+                try:
+                    proc = psutil.Process(pid)
+                    proc_name = proc.name()
+                except psutil.NoSuchProcess:
+                    return {'error': f"Process with PID {pid} not found"}
+                except psutil.AccessDenied:
+                    return {'error': f"Access denied to process with PID {pid}"}
+            elif name is not None:
+                # Find processes by name
+                matching_procs = []
+                for proc in psutil.process_iter(['pid', 'name']):
+                    try:
+                        if name.lower() in proc.info['name'].lower():
+                            matching_procs.append((proc.info['pid'], proc.info['name']))
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                
+                if not matching_procs:
+                    return {'error': f"No process found with name containing '{name}'"}
+                elif len(matching_procs) > 1:
+                    proc_list = '\n'.join([f"PID {p[0]}: {p[1]}" for p in matching_procs[:10]])
+                    return {'error': f"Multiple processes found. Please specify PID:\n{proc_list}"}
+                else:
+                    pid, proc_name = matching_procs[0]
+                    try:
+                        proc = psutil.Process(pid)
+                    except psutil.NoSuchProcess:
+                        return {'error': f"Process {proc_name} (PID {pid}) no longer exists"}
+            else:
+                return {'error': "Either pid or name must be provided"}
+            
+            # Safety check - protected processes
+            if is_protected_process(pid, proc_name):
+                return {'error': "This process is protected and cannot be terminated"}
+            
+            # Attempt termination
+            try:
+                if signal_type == 'KILL':
+                    proc.kill()
+                    time.sleep(2)  # Wait for termination
+                    if proc.is_running():
+                        return {'error': f"Failed to kill {proc_name} (PID {pid})"}
+                    else:
+                        return {'success': f"Terminated {proc_name} (PID {pid}) with SIGKILL"}
+                else:  # TERM
+                    proc.terminate()
+                    time.sleep(3)  # Wait for graceful termination
+                    
+                    if proc.is_running():
+                        if force:
+                            # Escalate to KILL
+                            proc.kill()
+                            time.sleep(2)
+                            if proc.is_running():
+                                return {'error': f"Failed to terminate {proc_name} (PID {pid}) even with force"}
+                            else:
+                                return {'success': f"Terminated {proc_name} (PID {pid}) with SIGTERM, escalated to SIGKILL"}
+                        else:
+                            return {'error': f"Process {proc_name} (PID {pid}) did not terminate gracefully. Use force=true to escalate"}
+                    else:
+                        return {'success': f"Terminated {proc_name} (PID {pid}) with SIGTERM"}
+                        
+            except psutil.NoSuchProcess:
+                return {'success': f"Process {proc_name} (PID {pid}) already terminated"}
+            except psutil.AccessDenied:
+                return {'error': f"Access denied - cannot terminate {proc_name} (PID {pid})"}
+            except Exception as e:
+                return {'error': f"Failed to terminate process: {str(e)}"}
+                
+        except Exception as e:
+            return {'error': f"Termination error: {str(e)}"}
+    
+    # Run in thread to avoid blocking
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _terminate_process)
+
 
 def control_youtube_media(action: str):
     """Attempt to control YouTube playback in common browsers. Returns (success, message)."""
@@ -1138,6 +1456,9 @@ async def help_command(interaction: discord.Interaction):
 /uptime - Show system uptime
 /processes - Show top 15 processes by CPU or RAM usage
 /camera - Take a webcam photo
+/find - Search files by name/regex, optional content filter
+/find-process - Find processes by name/PID; use before /kill. Alias: /find-proccess
+/kill - Terminate a process by PID (recommended) or name, with safety checks
 /all - Run all monitoring commands
 /debug - Check the status of screenshot, audio recording, camera, and key system functions
 """
@@ -1500,6 +1821,309 @@ async def execute_all(interaction: discord.Interaction):
             await interaction.response.send_message(f"Error executing all functions: {str(e)}")
         else:
             await interaction.followup.send(f"Error executing all functions: {str(e)}")
+
+@bot.tree.command(name='find', description='Search files by name/regex, optional content filter')
+@discord.app_commands.describe(
+    query='Search pattern (supports *.log, report_*.pdf for glob mode or regex patterns)',
+    path='Directory to search in (defaults to home directory)', 
+    mode='Search mode for filename matching',
+    content='Case-insensitive substring to search within files (≤10MB)',
+    limit='Maximum number of files to return',
+    depth='Maximum directory depth to search',
+    include_hidden='Include hidden files and directories'
+)
+@discord.app_commands.choices(mode=[
+    discord.app_commands.Choice(name='Glob Pattern (*.txt, file_*.log)', value='name_glob'),
+    discord.app_commands.Choice(name='Regex Pattern (^report_\\d+\\.pdf$)', value='name_regex')
+])
+async def find_files(interaction: discord.Interaction, query: str, path: str = None, 
+                    mode: discord.app_commands.Choice[str] = None, content: str = None,
+                    limit: int = 100, depth: int = 6, include_hidden: bool = False):
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        # Set defaults
+        search_path = path if path else FIND_DEFAULT_PATH
+        search_mode = mode.value if mode else 'name_glob'
+        
+        # Validate parameters
+        if limit > 2000:
+            limit = 2000
+        if depth > 20:
+            depth = 20
+            
+        # Perform search
+        result = await search_files_async(
+            query=query,
+            path=search_path, 
+            mode=search_mode,
+            content=content,
+            limit=limit,
+            depth=depth,
+            include_hidden=include_hidden
+        )
+        
+        if 'error' in result:
+            await interaction.followup.send(f"❌ Search failed: {result['error']}")
+            return
+        
+        files = result.get('results', [])
+        partial = result.get('partial', False)
+        message = result.get('message', '')
+        
+        if not files:
+            await interaction.followup.send("🔍 No files matched your criteria.")
+            return
+        
+        # Format results
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Show preview (up to 10 files)
+        preview_text = f"🔍 **Found {len(files)} file{'s' if len(files) != 1 else ''}**"
+        if partial:
+            preview_text += f" ({message})"
+        preview_text += f"\n**Search**: `{query}` in `{search_path}`\n"
+        if content:
+            preview_text += f"**Content filter**: `{content}`\n"
+        preview_text += "\n"
+        
+        for i, file_info in enumerate(files[:10]):
+            size_mb = file_info['size'] / (1024 * 1024)
+            if size_mb >= 1:
+                size_str = f"{size_mb:.1f}MB"
+            elif file_info['size'] >= 1024:
+                size_str = f"{file_info['size'] // 1024}KB"
+            else:
+                size_str = f"{file_info['size']}B"
+            
+            preview_text += f"- `{file_info['path']}` ({size_str}, {file_info['modified']})\n"
+        
+        if len(files) > 10:
+            preview_text += f"\n... and {len(files) - 10} more files (see attachment)"
+        
+        # Create attachment with full results
+        results_content = '\n'.join([file_info['path'] for file_info in files])
+        results_filename = f"results_find_{timestamp}.txt"
+        
+        with open(results_filename, 'w', encoding='utf-8') as f:
+            f.write(results_content)
+        
+        await interaction.followup.send(
+            preview_text,
+            file=discord.File(results_filename)
+        )
+        
+        # Clean up
+        os.remove(results_filename)
+        
+    except Exception as e:
+        logger.error(f"Error in find command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error searching files: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error searching files: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='find-process', description='Search processes by name/PID; use before /kill')
+@discord.app_commands.describe(
+    name='Process name substring or regex pattern',
+    pid='Exact process ID to find',
+    mode='Search mode for process name matching',
+    limit='Maximum number of processes to return',
+    sort_by='Sort processes by the specified criteria'
+)
+@discord.app_commands.choices(
+    mode=[
+        discord.app_commands.Choice(name='Substring Match (Chrome)', value='name_substring'),
+        discord.app_commands.Choice(name='Regex Pattern (python.*server)', value='name_regex')
+    ],
+    sort_by=[
+        discord.app_commands.Choice(name='CPU Usage', value='cpu'),
+        discord.app_commands.Choice(name='Memory Usage', value='mem'), 
+        discord.app_commands.Choice(name='Process ID', value='pid'),
+        discord.app_commands.Choice(name='Process Name', value='name')
+    ]
+)
+async def find_process(interaction: discord.Interaction, name: str = None, pid: int = None,
+                      mode: discord.app_commands.Choice[str] = None, limit: int = 15,
+                      sort_by: discord.app_commands.Choice[str] = None):
+    try:
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        
+        # Validate parameters
+        if not name and pid is None:
+            await interaction.followup.send("❌ Please provide either a process name or PID to search for.", ephemeral=True)
+            return
+        
+        if limit > 100:
+            limit = 100
+            
+        # Set defaults
+        search_mode = mode.value if mode else 'name_substring'
+        sort_criteria = sort_by.value if sort_by else 'cpu'
+        
+        # Perform search
+        result = await search_processes_async(
+            name=name,
+            pid=pid,
+            mode=search_mode,
+            limit=limit,
+            sort_by=sort_criteria
+        )
+        
+        if 'error' in result:
+            await interaction.followup.send(f"❌ Process search failed: {result['error']}", ephemeral=True)
+            return
+        
+        processes = result.get('results', [])
+        
+        if not processes:
+            search_term = f"PID {pid}" if pid is not None else f"name '{name}'"
+            await interaction.followup.send(f"🔍 No processes found matching {search_term}.", ephemeral=True)
+            return
+        
+        # Format results table
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Table header
+        table_text = "```"
+        table_text += f"{'PID':<8} {'NAME':<16} {'USER':<12} {'CPU%':<6} {'MEM_MB':<8} {'UPTIME':<8} {'CMD':<20}\n"
+        table_text += "-" * 80 + "\n"
+        
+        # Show up to 10 processes in the preview
+        for proc in processes[:10]:
+            proc_name = proc['name'][:15] if len(proc['name']) > 15 else proc['name']
+            username = proc['username'][:11] if len(proc['username']) > 11 else proc['username']  
+            cmdline = proc['cmdline'][:19] if len(proc['cmdline']) > 19 else proc['cmdline']
+            
+            table_text += f"{proc['pid']:<8} {proc_name:<16} {username:<12} {proc['cpu_percent']:<6.1f} {proc['memory_mb']:<8.1f} {proc['uptime']:<8} {cmdline:<20}\n"
+        
+        table_text += "```"
+        
+        search_term = f"PID {pid}" if pid is not None else f"name '{name}'"
+        response_text = f"🔍 **Found {len(processes)} process{'es' if len(processes) != 1 else ''}** matching {search_term}\n"
+        response_text += f"**Sorted by**: {sort_criteria}\n\n{table_text}"
+        
+        if len(processes) > 10:
+            response_text += f"\n... and {len(processes) - 10} more processes (see attachment)"
+            
+            # Create CSV attachment for full results
+            csv_filename = f"processes_{timestamp}.csv"
+            with open(csv_filename, 'w', encoding='utf-8') as f:
+                f.write("PID,NAME,USER,CPU%,MEM_MB,UPTIME,CMD\n")
+                for proc in processes:
+                    f.write(f"{proc['pid']},{proc['name']},{proc['username']},{proc['cpu_percent']:.1f},{proc['memory_mb']:.1f},{proc['uptime']},{proc['cmdline']}\n")
+            
+            await interaction.followup.send(
+                response_text,
+                file=discord.File(csv_filename),
+                ephemeral=True
+            )
+            
+            # Clean up
+            os.remove(csv_filename)
+        else:
+            await interaction.followup.send(response_text, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Error in find-process command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error searching processes: {str(e)}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error searching processes: {str(e)}", ephemeral=True)
+        except Exception:
+            pass
+
+# Alias for find-process command (find-proccess)
+@bot.tree.command(name='find-proccess', description='Search processes by name/PID; use before /kill (alias for find-process)')
+@discord.app_commands.describe(
+    name='Process name substring or regex pattern',
+    pid='Exact process ID to find',
+    mode='Search mode for process name matching',
+    limit='Maximum number of processes to return',
+    sort_by='Sort processes by the specified criteria'
+)
+@discord.app_commands.choices(
+    mode=[
+        discord.app_commands.Choice(name='Substring Match (Chrome)', value='name_substring'),
+        discord.app_commands.Choice(name='Regex Pattern (python.*server)', value='name_regex')
+    ],
+    sort_by=[
+        discord.app_commands.Choice(name='CPU Usage', value='cpu'),
+        discord.app_commands.Choice(name='Memory Usage', value='mem'),
+        discord.app_commands.Choice(name='Process ID', value='pid'),
+        discord.app_commands.Choice(name='Process Name', value='name')
+    ]
+)
+async def find_proccess_alias(interaction: discord.Interaction, name: str = None, pid: int = None,
+                             mode: discord.app_commands.Choice[str] = None, limit: int = 15,
+                             sort_by: discord.app_commands.Choice[str] = None):
+    # Simply call the main find_process function
+    await find_process(interaction, name, pid, mode, limit, sort_by)
+
+@bot.tree.command(name='kill', description='Terminate a process by PID (recommended) or name, with safety checks')
+@discord.app_commands.describe(
+    pid='Process ID to terminate (recommended - use /find-process first)',
+    name='Process name to terminate (only if PID not provided)',
+    signal='Signal type to send to the process',
+    force='If TERM fails, automatically escalate to KILL after 3 seconds'
+)
+@discord.app_commands.choices(signal=[
+    discord.app_commands.Choice(name='SIGTERM (graceful)', value='TERM'),
+    discord.app_commands.Choice(name='SIGKILL (force)', value='KILL')
+])
+async def kill_process(interaction: discord.Interaction, pid: int = None, name: str = None,
+                      signal: discord.app_commands.Choice[str] = None, force: bool = False):
+    try:
+        # Authorization check
+        guild_owner_id = interaction.guild.owner_id if interaction.guild else interaction.user.id
+        if not is_authorized_user(interaction.user.id, guild_owner_id):
+            await interaction.response.send_message(
+                "❌ You are not authorized to use /kill.", 
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        
+        # Validate parameters
+        if not pid and not name:
+            await interaction.followup.send(
+                "❌ Please provide either a PID or process name. Use `/find-process` to find the target process first.",
+                ephemeral=True
+            )
+            return
+        
+        # Set defaults
+        signal_type = signal.value if signal else 'TERM'
+        
+        # Perform termination
+        result = await terminate_process_async(
+            pid=pid,
+            name=name,
+            signal_type=signal_type,
+            force=force
+        )
+        
+        if 'error' in result:
+            await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+        elif 'success' in result:
+            await interaction.followup.send(f"✅ {result['success']}", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Unknown error occurred during termination.", ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Error in kill command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error terminating process: {str(e)}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Error terminating process: {str(e)}", ephemeral=True)
+        except Exception:
+            pass
 
 @bot.tree.command(name='debug', description='Test all system functions')
 async def debug(interaction: discord.Interaction):
