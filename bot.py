@@ -1950,11 +1950,11 @@ async def find_process(interaction: discord.Interaction, name: str = None, pid: 
                       mode: discord.app_commands.Choice[str] = None, limit: int = 15,
                       sort_by: discord.app_commands.Choice[str] = None):
     try:
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True)
         
         # Validate parameters
         if not name and pid is None:
-            await interaction.followup.send("❌ Please provide either a process name or PID to search for.", ephemeral=True)
+            await interaction.followup.send("❌ Please provide either a process name or PID to search for.")
             return
         
         if limit > 100:
@@ -1974,14 +1974,14 @@ async def find_process(interaction: discord.Interaction, name: str = None, pid: 
         )
         
         if 'error' in result:
-            await interaction.followup.send(f"❌ Process search failed: {result['error']}", ephemeral=True)
+            await interaction.followup.send(f"❌ Process search failed: {result['error']}")
             return
         
         processes = result.get('results', [])
         
         if not processes:
             search_term = f"PID {pid}" if pid is not None else f"name '{name}'"
-            await interaction.followup.send(f"🔍 No processes found matching {search_term}.", ephemeral=True)
+            await interaction.followup.send(f"🔍 No processes found matching {search_term}.")
             return
         
         # Format results table
@@ -2019,50 +2019,23 @@ async def find_process(interaction: discord.Interaction, name: str = None, pid: 
             await interaction.followup.send(
                 response_text,
                 file=discord.File(csv_filename),
-                ephemeral=True
             )
             
             # Clean up
             os.remove(csv_filename)
         else:
-            await interaction.followup.send(response_text, ephemeral=True)
+            await interaction.followup.send(response_text)
         
     except Exception as e:
         logger.error(f"Error in find-process command: {str(e)}")
         try:
             if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error searching processes: {str(e)}", ephemeral=True)
+                await interaction.response.send_message(f"❌ Error searching processes: {str(e)}")
             else:
                 await interaction.followup.send(f"❌ Error searching processes: {str(e)}", ephemeral=True)
         except Exception:
             pass
 
-# Alias for find-process command (find-proccess)
-@bot.tree.command(name='find-proccess', description='Search processes by name/PID; use before /kill (alias for find-process)')
-@discord.app_commands.describe(
-    name='Process name substring or regex pattern',
-    pid='Exact process ID to find',
-    mode='Search mode for process name matching',
-    limit='Maximum number of processes to return',
-    sort_by='Sort processes by the specified criteria'
-)
-@discord.app_commands.choices(
-    mode=[
-        discord.app_commands.Choice(name='Substring Match (Chrome)', value='name_substring'),
-        discord.app_commands.Choice(name='Regex Pattern (python.*server)', value='name_regex')
-    ],
-    sort_by=[
-        discord.app_commands.Choice(name='CPU Usage', value='cpu'),
-        discord.app_commands.Choice(name='Memory Usage', value='mem'),
-        discord.app_commands.Choice(name='Process ID', value='pid'),
-        discord.app_commands.Choice(name='Process Name', value='name')
-    ]
-)
-async def find_proccess_alias(interaction: discord.Interaction, name: str = None, pid: int = None,
-                             mode: discord.app_commands.Choice[str] = None, limit: int = 15,
-                             sort_by: discord.app_commands.Choice[str] = None):
-    # Simply call the main find_process function
-    await find_process(interaction, name, pid, mode, limit, sort_by)
 
 @bot.tree.command(name='kill', description='Terminate a process by PID (recommended) or name, with safety checks')
 @discord.app_commands.describe(
@@ -2083,17 +2056,15 @@ async def kill_process(interaction: discord.Interaction, pid: int = None, name: 
         if not is_authorized_user(interaction.user.id, guild_owner_id):
             await interaction.response.send_message(
                 "❌ You are not authorized to use /kill.", 
-                ephemeral=True
             )
             return
         
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True)
         
         # Validate parameters
         if not pid and not name:
             await interaction.followup.send(
                 "❌ Please provide either a PID or process name. Use `/find-process` to find the target process first.",
-                ephemeral=True
             )
             return
         
