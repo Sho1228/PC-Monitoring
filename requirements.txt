@@ -9,3 +9,4 @@ pynput
 pyobjc-framework-Quartz
 Pillow
 requests
+pyautogui
