@@ -55,6 +55,14 @@ A comprehensive Discord bot for remotely monitoring and controlling a macOS comp
   - System shortcuts: `/shortcut fn+f3` (Mission Control)
   - Complex combinations: `/shortcut ctrl+shift+esc`
 
+### 🚫 Website Blocking & Filtering
+- **`/block`**: Unified website blocking and filtering management
+  - **Block**: `/block action:🚫 Block Website domain:facebook.com`
+  - **Unblock**: `/block action:✅ Unblock Website domain:facebook.com`
+  - **List**: `/block action:📋 List Blocked` - Show all blocked websites
+  - **Clear**: `/block action:🗑️ Clear All confirm:yes` - Remove all blocks
+  - **Features**: Domain format support (`facebook.com`, `www.facebook.com`, `https://facebook.com`), automatic protocol/path stripping, DNS resolution verification, critical domain protection, hosts file modification, automatic DNS cache flushing, backup system
+
 ### 🛠️ Utilities
 - **`/all`**: Run all major monitoring commands at once
 - **`/debug`**: Test core functionalities and check for permission issues
@@ -103,6 +111,22 @@ echo "DISCORD_TOKEN=your_discord_bot_token_here" > .env
 
 Replace `your_discord_bot_token_here` with your actual Discord bot token.
 
+**Optional Environment Variables:**
+```bash
+# For process termination authorization (/kill command)
+ALLOWED_USER_IDS=123456789,987654321
+
+# For website blocking authorization (/block commands)  
+BLOCK_AUTHORIZED_USERS=123456789,987654321
+
+# For custom search path (/find command)
+FIND_DEFAULT_PATH=/Users/yourusername
+```
+
+- `ALLOWED_USER_IDS`: Comma-separated Discord user IDs authorized to use the `/kill` command
+- `BLOCK_AUTHORIZED_USERS`: Comma-separated Discord user IDs authorized to use website blocking commands (if empty, all users can use blocking)
+- `FIND_DEFAULT_PATH`: Default path for file searches (defaults to home directory)
+
 ### 5. Set Up Location Shortcut (For `/locate` command)
 
 The `/locate` command relies on a macOS Shortcut to access precise GPS data.
@@ -123,6 +147,9 @@ The bot requires several macOS permissions. Go to **System Settings > Privacy & 
 - **Accessibility**: For `/keylogger`, media controls, browser automation, and GUI automation (`/click`, `/type`, `/scroll`, `/shortcut`)
 - **Full Disk Access**: For browser history database access (`/browser-history`)
 - **Location Services**: Ensure the **Shortcuts** app is enabled for `/locate`
+- **Admin/Sudo Privileges**: For website blocking commands (`/block`, `/unblock`, `/block-list`, `/block-clear`) to modify `/etc/hosts` file
+
+**Important for Website Blocking**: The terminal or Python application needs admin privileges to modify the system hosts file. You may need to run the bot with `sudo python3 bot.py` or grant admin access to your terminal application.
 
 ### 7. Invite Bot to Your Server
 
@@ -160,9 +187,12 @@ The bot will announce startup in the `#pc-monitor` channel and be ready for slas
 - The bot captures screenshots, audio, keystrokes, and camera images
 - Browser history and active tabs can be monitored
 - Commands can execute with full system privileges
+- **Website blocking modifies system hosts file** and affects all applications
+- DNS cache flushing requires admin privileges and affects system networking
 - **Never share your Discord bot token**
 - Only use this bot on servers you trust completely
-- Consider the implications of keylogger and surveillance features
+- Consider the implications of keylogger, surveillance, and network control features
+- Website blocks persist until explicitly removed and affect all users on the system
 
 ## Troubleshooting
 
@@ -209,6 +239,13 @@ The bot will announce startup in the `#pc-monitor` channel and be ready for slas
 # Browser Monitoring
 /active-tabs
 /website-monitor start
+
+# Website Blocking
+/block action:🚫 Block Website domain:facebook.com
+/block action:🚫 Block Website domain:youtube.com
+/block action:✅ Unblock Website domain:facebook.com
+/block action:📋 List Blocked
+/block action:🗑️ Clear All confirm:yes
 
 # System Control
 /volume 50

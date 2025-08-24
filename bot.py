@@ -59,6 +59,7 @@ if not TOKEN:
 # Configuration for new commands
 ALLOWED_USER_IDS = os.getenv('ALLOWED_USER_IDS', '')  # Comma-separated list of user IDs authorized for /kill
 FIND_DEFAULT_PATH = os.getenv('FIND_DEFAULT_PATH', str(Path.home()))  # Default search path for /find command
+BLOCK_AUTHORIZED_USERS = os.getenv('BLOCK_AUTHORIZED_USERS', '')  # Comma-separated list of user IDs authorized for website blocking
 
 # Bot setup
 intents = discord.Intents.default()
@@ -78,6 +79,9 @@ website_monitor_active = False
 website_monitor_thread = None
 website_monitor_channel = None
 last_active_url = ""
+
+# variables for website blocking
+command_history = []  # Track last 20 executed commands
 
 # def func
 def take_screenshot():
@@ -2675,6 +2679,241 @@ async def on_ready():
                     logger.error(f"Error sending fallback ready message: {str(e)}")
                     continue
 
+# Website Blocking Functions
+def validate_domain(domain):
+    """Validate domain format and check if it's safe to block."""
+    import re
+    import socket
+    
+    # Remove protocol if present
+    domain = domain.replace('http://', '').replace('https://', '').replace('www.', '')
+    
+    # Remove path if present
+    domain = domain.split('/')[0]
+    
+    # Basic domain validation
+    domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
+    if not re.match(domain_pattern, domain):
+        return False, "Invalid domain format", None
+    
+    # Critical domains whitelist (should never be blocked)
+    critical_domains = [
+        'apple.com', 'icloud.com', 'me.com', 'mac.com',
+        'microsoft.com', 'live.com', 'outlook.com', 'office.com',
+        'google.com', 'gmail.com', 'googleapis.com',
+        'discord.com', 'discordapp.com',
+        'github.com', 'githubusercontent.com',
+        'localhost', '127.0.0.1'
+    ]
+    
+    for critical in critical_domains:
+        if domain == critical or domain.endswith('.' + critical):
+            return False, f"Cannot block critical domain: {domain}", None
+    
+    # Try DNS resolution to verify domain exists
+    try:
+        socket.gethostbyname(domain)
+        return True, "Valid domain", domain
+    except socket.gaierror:
+        return False, "Domain does not exist or cannot be resolved", None
+
+def backup_hosts_file():
+    """Create a backup of the hosts file."""
+    hosts_path = '/etc/hosts'
+    backup_path = f'/tmp/hosts_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    
+    try:
+        shutil.copy2(hosts_path, backup_path)
+        return True, backup_path
+    except Exception as e:
+        return False, str(e)
+
+def flush_dns_cache():
+    """Flush DNS cache to ensure immediate effect."""
+    try:
+        subprocess.run(['sudo', 'dscacheutil', '-flushcache'], 
+                      capture_output=True, text=True, timeout=10)
+        subprocess.run(['sudo', 'killall', '-HUP', 'mDNSResponder'], 
+                      capture_output=True, text=True, timeout=10)
+        return True, "DNS cache flushed successfully"
+    except Exception as e:
+        return False, f"Failed to flush DNS cache: {str(e)}"
+
+def block_website(domain):
+    """Add domain to hosts file to block access."""
+    is_valid, message, clean_domain = validate_domain(domain)
+    if not is_valid:
+        return False, message
+    
+    hosts_path = '/etc/hosts'
+    block_entry = f"127.0.0.1 {clean_domain}\n"
+    
+    try:
+        # Create backup first
+        backup_success, backup_path = backup_hosts_file()
+        if not backup_success:
+            logger.warning(f"Failed to create hosts backup: {backup_path}")
+        
+        # Check if domain is already blocked
+        with open(hosts_path, 'r') as f:
+            content = f.read()
+            if f"127.0.0.1 {clean_domain}" in content:
+                return False, f"Domain {clean_domain} is already blocked"
+        
+        # Add blocking entry
+        with open(hosts_path, 'a') as f:
+            f.write(f"\n# Blocked by PC Monitor Bot - {datetime.now().isoformat()}\n")
+            f.write(block_entry)
+        
+        # Flush DNS cache
+        flush_success, flush_msg = flush_dns_cache()
+        if not flush_success:
+            logger.warning(f"DNS flush warning: {flush_msg}")
+        
+        logger.info(f"Blocked domain: {clean_domain}")
+        return True, f"Successfully blocked {clean_domain}"
+        
+    except PermissionError:
+        return False, "Permission denied. Bot needs admin privileges to modify hosts file."
+    except Exception as e:
+        return False, f"Failed to block domain: {str(e)}"
+
+def unblock_website(domain):
+    """Remove domain from hosts file to unblock access."""
+    is_valid, message, clean_domain = validate_domain(domain)
+    if not is_valid:
+        return False, message
+    
+    hosts_path = '/etc/hosts'
+    
+    try:
+        # Create backup first
+        backup_success, backup_path = backup_hosts_file()
+        if not backup_success:
+            logger.warning(f"Failed to create hosts backup: {backup_path}")
+        
+        # Read current hosts file
+        with open(hosts_path, 'r') as f:
+            lines = f.readlines()
+        
+        # Filter out the blocked domain and its comment
+        new_lines = []
+        skip_next = False
+        found = False
+        
+        for line in lines:
+            if skip_next:
+                skip_next = False
+                continue
+                
+            if f"127.0.0.1 {clean_domain}" in line:
+                found = True
+                # Skip the comment line before this entry if it exists
+                if new_lines and "# Blocked by PC Monitor Bot" in new_lines[-1]:
+                    new_lines.pop()
+                continue
+            else:
+                new_lines.append(line)
+        
+        if not found:
+            return False, f"Domain {clean_domain} is not currently blocked"
+        
+        # Write back the modified content
+        with open(hosts_path, 'w') as f:
+            f.writelines(new_lines)
+        
+        # Flush DNS cache
+        flush_success, flush_msg = flush_dns_cache()
+        if not flush_success:
+            logger.warning(f"DNS flush warning: {flush_msg}")
+        
+        logger.info(f"Unblocked domain: {clean_domain}")
+        return True, f"Successfully unblocked {clean_domain}"
+        
+    except PermissionError:
+        return False, "Permission denied. Bot needs admin privileges to modify hosts file."
+    except Exception as e:
+        return False, f"Failed to unblock domain: {str(e)}"
+
+def list_blocked_websites():
+    """List all currently blocked websites."""
+    hosts_path = '/etc/hosts'
+    
+    try:
+        with open(hosts_path, 'r') as f:
+            lines = f.readlines()
+        
+        blocked_domains = []
+        for line in lines:
+            line = line.strip()
+            if line.startswith('127.0.0.1 ') and not line.startswith('127.0.0.1 localhost'):
+                domain = line.split()[1]
+                blocked_domains.append(domain)
+        
+        return True, blocked_domains
+        
+    except Exception as e:
+        return False, f"Failed to read hosts file: {str(e)}"
+
+def clear_all_blocked_websites():
+    """Remove all blocked websites from hosts file."""
+    hosts_path = '/etc/hosts'
+    
+    try:
+        # Create backup first
+        backup_success, backup_path = backup_hosts_file()
+        if not backup_success:
+            logger.warning(f"Failed to create hosts backup: {backup_path}")
+        
+        # Read current hosts file
+        with open(hosts_path, 'r') as f:
+            lines = f.readlines()
+        
+        # Filter out all blocked domains and their comments
+        new_lines = []
+        skip_next = False
+        removed_count = 0
+        
+        for line in lines:
+            if skip_next:
+                skip_next = False
+                continue
+                
+            if "# Blocked by PC Monitor Bot" in line:
+                skip_next = True  # Skip the next line (the actual block entry)
+                continue
+            elif line.strip().startswith('127.0.0.1 ') and not line.strip().startswith('127.0.0.1 localhost'):
+                # This is a blocking entry without comment
+                removed_count += 1
+                continue
+            else:
+                new_lines.append(line)
+        
+        # Write back the modified content
+        with open(hosts_path, 'w') as f:
+            f.writelines(new_lines)
+        
+        # Flush DNS cache
+        flush_success, flush_msg = flush_dns_cache()
+        if not flush_success:
+            logger.warning(f"DNS flush warning: {flush_msg}")
+        
+        logger.info(f"Cleared {removed_count} blocked domains")
+        return True, f"Successfully cleared {removed_count} blocked domains"
+        
+    except PermissionError:
+        return False, "Permission denied. Bot needs admin privileges to modify hosts file."
+    except Exception as e:
+        return False, f"Failed to clear blocked domains: {str(e)}"
+
+def is_user_authorized_for_blocking(user_id):
+    """Check if user is authorized to use blocking commands."""
+    if not BLOCK_AUTHORIZED_USERS:
+        return True  # If no restrictions set, allow all users
+    
+    authorized_ids = [id.strip() for id in BLOCK_AUTHORIZED_USERS.split(',') if id.strip()]
+    return str(user_id) in authorized_ids
+
 @bot.event
 async def on_message(message):
     logger.info(f'Received message: {message.content} from {message.author}')
@@ -2753,6 +2992,35 @@ async def help_command(interaction: discord.Interaction):
   **Supported keys:** command, ctrl, alt, shift, fn, f1-f12, a-z, 0-9,
   tab, enter, space, up, down, left, right, delete, backspace
   **Format:** Use + to separate (max 5 keys)
+
+## 🚫 Website Blocking & Filtering
+• **/block** `action` - Unified website blocking management
+  - **🚫 Block Website**: `/block action:🚫 Block Website domain:facebook.com`
+  - **✅ Unblock Website**: `/block action:✅ Unblock Website domain:facebook.com` 
+  - **📋 List Blocked**: `/block action:📋 List Blocked`
+  - **🗑️ Clear All**: `/block action:🗑️ Clear All confirm:yes`
+  
+**Domain Format Support:**
+  - `example.com`, `www.example.com`, `https://example.com`
+  - Automatically strips protocols/paths and validates domain format
+  
+**Usage Examples:**
+  - `/block action:🚫 Block Website domain:youtube.com`
+  - `/block action:✅ Unblock Website domain:youtube.com`
+  - `/block action:📋 List Blocked`
+  - `/block action:🗑️ Clear All confirm:yes`
+  
+**🛡️ Security Features:**
+- Domain validation & DNS resolution checking
+- Critical domain protection (Apple, Microsoft, Discord, etc.)
+- Automatic hosts file backup before modifications
+- DNS cache flushing for immediate effect
+- User authorization via `BLOCK_AUTHORIZED_USERS` env variable
+
+**⚠️ Requirements:**
+- Requires admin/sudo privileges for hosts file modification
+- System-wide blocking affects all applications and browsers
+- Blocks persist until explicitly removed or system reboot
 
 ## 🛠️ Utilities
 • **/all** - Run comprehensive system monitoring suite
@@ -4289,6 +4557,38 @@ async def debug(interaction: discord.Interaction):
             results.append('🟡 Command Execution: OK (Basic functions working)')
     except Exception as e:
         results.append(f'🔴 Command Execution: FAIL\n{str(e)}')
+    # Website blocking test
+    try:
+        # Test domain validation without actually blocking anything
+        test_domains = ['example.com', 'invalid-domain', 'apple.com']
+        validation_results = []
+        
+        for domain in test_domains:
+            is_valid, message, clean_domain = validate_domain(domain)
+            if domain == 'example.com' and is_valid:
+                validation_results.append('✓ Valid domain detection')
+            elif domain == 'invalid-domain' and not is_valid:
+                validation_results.append('✓ Invalid domain rejection') 
+            elif domain == 'apple.com' and not is_valid and 'critical' in message.lower():
+                validation_results.append('✓ Critical domain protection')
+        
+        # Test hosts file access (read only)
+        try:
+            success, blocked_domains = list_blocked_websites()
+            if success:
+                validation_results.append(f'✓ Hosts file access (found {len(blocked_domains)} entries)')
+            else:
+                validation_results.append('⚠ Hosts file read limited')
+        except:
+            validation_results.append('⚠ Hosts file access requires admin')
+        
+        if len(validation_results) >= 3:
+            results.append(f'🟢 Website Blocking: OK ({len(validation_results)} validations passed)')
+        else:
+            results.append(f'🟡 Website Blocking: Partial ({len(validation_results)} validations passed)')
+            
+    except Exception as e:
+        results.append(f'🔴 Website Blocking: FAIL\n{str(e)}')
     await interaction.followup.send('\n'.join(results))
 
 @bot.tree.command(name='scroll', description='Scroll mouse wheel at coordinates or current position')
@@ -4430,6 +4730,95 @@ async def type_command(interaction: discord.Interaction, text: str):
                 await interaction.response.send_message(f"❌ Error typing: {str(e)}")
             else:
                 await interaction.followup.send(f"❌ Error typing: {str(e)}")
+        except Exception:
+            pass
+
+@bot.tree.command(name='block', description='Website blocking and filtering management')
+@discord.app_commands.describe(
+    action='Action to perform',
+    domain='Domain name (required for block/unblock actions)',
+    confirm='Confirmation for clear action (type "yes" to confirm)'
+)
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name='🚫 Block Website', value='block'),
+    discord.app_commands.Choice(name='✅ Unblock Website', value='unblock'),
+    discord.app_commands.Choice(name='📋 List Blocked', value='list'),
+    discord.app_commands.Choice(name='🗑️ Clear All', value='clear')
+])
+async def block_command(interaction: discord.Interaction, action: discord.app_commands.Choice[str], domain: str = None, confirm: str = "no"):
+    # Check if command is used in pc-monitor channel
+    if not is_pc_monitor_channel(interaction):
+        await interaction.response.send_message("❌ This command can only be used in the #pc-monitor channel.")
+        return
+    
+    # Check user authorization
+    if not is_user_authorized_for_blocking(interaction.user.id):
+        await interaction.response.send_message("❌ You are not authorized to use website blocking commands.")
+        return
+    
+    action_value = action.value
+    
+    try:
+        # Handle different actions
+        if action_value == 'block':
+            if not domain:
+                await interaction.response.send_message("❌ Domain parameter is required for blocking action.\n**Usage:** `/block action:🚫 Block Website domain:example.com`")
+                return
+                
+            await interaction.response.defer()
+            success, message = block_website(domain)
+            
+            if success:
+                await interaction.followup.send(f"🚫 {message}")
+            else:
+                await interaction.followup.send(f"❌ {message}")
+                
+        elif action_value == 'unblock':
+            if not domain:
+                await interaction.response.send_message("❌ Domain parameter is required for unblocking action.\n**Usage:** `/block action:✅ Unblock Website domain:example.com`")
+                return
+                
+            await interaction.response.defer()
+            success, message = unblock_website(domain)
+            
+            if success:
+                await interaction.followup.send(f"✅ {message}")
+            else:
+                await interaction.followup.send(f"❌ {message}")
+                
+        elif action_value == 'list':
+            await interaction.response.defer()
+            success, result = list_blocked_websites()
+            
+            if success:
+                if result:
+                    blocked_list = "\n".join([f"• {domain}" for domain in result])
+                    await interaction.followup.send(f"🚫 **Currently Blocked Websites** ({len(result)}):\n```\n{blocked_list}\n```")
+                else:
+                    await interaction.followup.send("✅ No websites are currently blocked.")
+            else:
+                await interaction.followup.send(f"❌ {result}")
+                
+        elif action_value == 'clear':
+            if confirm.lower() != "yes":
+                await interaction.response.send_message("⚠️ This will remove ALL website blocks. To confirm, use:\n`/block action:🗑️ Clear All confirm:yes`")
+                return
+                
+            await interaction.response.defer()
+            success, message = clear_all_blocked_websites()
+            
+            if success:
+                await interaction.followup.send(f"✅ {message}")
+            else:
+                await interaction.followup.send(f"❌ {message}")
+        
+    except Exception as e:
+        logger.error(f"Error in block command ({action_value}): {str(e)}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error in {action_value} action: {str(e)}")
+            else:
+                await interaction.followup.send(f"❌ Error in {action_value} action: {str(e)}")
         except Exception:
             pass
 
